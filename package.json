@@ -1,0 +1,27 @@
+{
+  "name": "github-project-pusher",
+  "version": "2.1.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js",
+    "desktop": "electron electron/main.cjs",
+    "build:desktop": "electron-builder --config electron-builder.yml",
+    "build:windows-installer": "electron-builder --config electron-builder.yml --win msi",
+    "build:android": "npx cap sync android && (test -x android/gradlew && ./android/gradlew -p android assembleDebug || (cd android && gradle assembleDebug))",
+    "prepare:android": "npx cap add android && npx cap sync android"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "multer": "^2.0.2"
+  },
+  "devDependencies": {
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "electron": "^39.0.0",
+    "electron-builder": "^26.0.12"
+  },
+  "main": "electron/main.cjs"
+}

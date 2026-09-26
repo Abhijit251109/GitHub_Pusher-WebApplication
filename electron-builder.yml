@@ -1,0 +1,13 @@
+appId: com.githubprojectpusher.app
+productName: GitHub Project Pusher
+files:
+  - electron/**
+mac:
+  target: dmg
+win:
+  target:
+    - msi
+    - nsis
+  artifactName: github_pusher.${ext}
+linux:
+  target: AppImage

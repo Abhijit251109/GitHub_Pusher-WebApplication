@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="description" content="Persistent GitHub project library and live sync dashboard." />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icons/icon.svg" />
+  <link rel="stylesheet" href="/styles.css" />
+  <title>GitHub Project Pusher</title>
+</head>
+<body>
+  <header class="topbar"><div><div class="brand">GitHub Project Pusher</div><div class="sub">Project library · GitHub sync · installable app</div></div><div class="top-actions"><button id="installBtn" class="ghost" hidden>Install App</button><div id="userBox"></div></div></header>
+  <main class="container">
+    <section id="authView" class="card auth" hidden><div class="orb">⇄</div><h1>Your projects, always with you.</h1><p>Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p><a class="primary big" href="/api/auth/login">Continue with GitHub</a><small>GitHub permissions are requested through GitHub's authorization screen. Your token stays server-side.</small></section>
+    <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Available builds are detected automatically from the application folder.</p></div></div><div id="downloadList" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
+    <section id="appView" hidden>
+      <div class="toolbar card"><div class="toolbar-left"><button id="addBtn" class="primary">＋ Add Project</button><button id="pushBtn" class="secondary" disabled>↥ Push Selected</button><button id="removeBtn" class="danger" disabled>Remove</button></div><div class="toolbar-right"><span id="liveDot" class="dot"></span><span id="liveText">Connecting…</span><button id="refreshBtn" class="ghost">Refresh</button></div></div>
+      <div class="grid">
+        <section class="card projects"><div class="section-head"><div><h2>My Projects</h2><p id="projectSummary">0 projects</p></div><input id="search" placeholder="Search projects…" /></div><div id="projectList" class="project-list"></div><div id="empty" class="empty">No projects yet. Add a folder or select some code files.</div></section>
+        <aside class="card details"><h2>Project Details</h2><div id="detailsEmpty" class="muted">Select a project to see GitHub, sync, and snapshot information.</div><div id="details" hidden></div></aside>
+      </div>
+      <section class="card snapshots"><div class="section-head"><div><h2>Safety Snapshots</h2><p>Before and after every push/pull.</p></div></div><div id="snapshotList" class="snapshot-list"></div></section>
+      <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Native builds found in the application folder.</p></div></div><div id="downloadListApp" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
+      <section class="card install"><div><h2>Install the app</h2><p>On Android or a modern desktop browser, use the button below to install the PWA. The same hosted account works across your devices.</p></div><button id="installBtn2" class="secondary">Install</button></section>
+    </section>
+  </main>
+  <dialog id="addDialog"><form method="dialog" id="addForm"><h2>Add Project</h2><label>Project name<input id="projectName" name="projectName" placeholder="my-project" /></label><div class="file-picks"><label class="pick"><span>📁 Add folder</span><input id="folderInput" type="file" webkitdirectory directory multiple /></label><label class="pick"><span>📄 Add files</span><input id="fileInput" type="file" multiple /></label></div><div id="addCount" class="muted">0 files selected</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="saveProject" class="primary" type="submit">Add Project</button></div></form></dialog>
+  <dialog id="pushDialog"><form method="dialog" id="pushForm"><h2>Push Project</h2><div class="muted" id="pushProjectName"></div><label>GitHub repository<select id="repoSelect"><option value="">＋ Create a new repository</option></select></label><label id="newRepoRow">New repository name<input id="newRepoName" /></label><label id="visibilityRow">Visibility<select id="visibility"><option value="private">Private</option><option value="public">Public</option></select></label><label>Branch<input id="branch" value="main" /></label><div class="warning">A selected repository with unrelated existing history may require a manual merge. The app will not force-push over it.</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="confirmPush" class="primary" type="submit">Push</button></div></form></dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
