@@ -11,7 +11,8 @@
 // Supabase client directly. The current app continues to use the Render API for
 // privileged operations.
 window.GPP_CONFIG = Object.assign({
-  API_BASE: '',
+  // Render production API. Change this only if your Render service uses a different URL.
+  API_BASE: 'https://github-project-pusher.onrender.com',
   SUPABASE_URL: 'https://vsrooptemnxxqolzbeze.supabase.co',
   SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_DemHkA2PuMrqymIjUyFNJg_MYy1fFpo'
 }, window.GPP_CONFIG || {});

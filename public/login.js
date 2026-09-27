@@ -1,7 +1,18 @@
 (() => {
   const trimBase = value => String(value || '').trim().replace(/\/+$/, '');
   const configured = trimBase((window.GPP_CONFIG || {}).API_BASE || '');
-  const saved = trimBase(sessionStorage.getItem('gpp_app_url') || localStorage.getItem('gpp_app_url') || configured);
+  const isPagesHost = /(^|\.)github\.io$/.test(location.hostname) || /(^|\.)githubusercontent\.com$/.test(location.hostname);
+  const stored = trimBase(sessionStorage.getItem('gpp_app_url') || localStorage.getItem('gpp_app_url') || '');
+  // On GitHub Pages, deployment config must take precedence over stale browser storage.
+  const saved = isPagesHost ? (configured || stored) : (stored || configured);
+  if (isPagesHost && configured && stored && stored !== configured) {
+    sessionStorage.removeItem('gpp_app_url');
+    localStorage.removeItem('gpp_app_url');
+  }
+  if (isPagesHost && configured) {
+    sessionStorage.setItem('gpp_app_url', configured);
+    localStorage.setItem('gpp_app_url', configured);
+  }
   const status = document.getElementById('status');
   const setup = document.getElementById('setup');
   const input = document.getElementById('appUrl');
@@ -10,7 +21,12 @@
   const code = params.get('code');
 
   function validBase(base) {
-    try { const u = new URL(base); return /^https?:$/.test(u.protocol); } catch { return false; }
+    try {
+      const u = new URL(base);
+      if (!/^https?:$/.test(u.protocol)) return false;
+      if (isPagesHost && /^(localhost|127\.0\.0\.1|0\.0\.0\.0)$/i.test(u.hostname)) return false;
+      return true;
+    } catch { return false; }
   }
   function backendFromCurrentPage() {
     if (!location.hostname.endsWith('.github.io') && !location.hostname.endsWith('.githubusercontent.com')) return location.origin;

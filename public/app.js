@@ -1,6 +1,14 @@
 const CONFIG = window.GPP_CONFIG || { API_BASE: '' };
 const trimBase = value => String(value || '').trim().replace(/\/+$/, '');
-const API_BASE = trimBase(CONFIG.API_BASE || sessionStorage.getItem('gpp_app_url') || localStorage.getItem('gpp_app_url') || '');
+const IS_PAGES_HOST = /(^|\.)github\.io$/.test(location.hostname) || /(^|\.)githubusercontent\.com$/.test(location.hostname);
+const CONFIGURED_API_BASE = trimBase(CONFIG.API_BASE || '');
+const STORED_API_BASE = trimBase(sessionStorage.getItem('gpp_app_url') || localStorage.getItem('gpp_app_url') || '');
+// Never let stale localhost storage override the configured production API on GitHub Pages.
+const API_BASE = trimBase(IS_PAGES_HOST ? (CONFIGURED_API_BASE || STORED_API_BASE) : (STORED_API_BASE || CONFIGURED_API_BASE));
+if (IS_PAGES_HOST && CONFIGURED_API_BASE && STORED_API_BASE !== CONFIGURED_API_BASE) {
+  sessionStorage.setItem('gpp_app_url', CONFIGURED_API_BASE);
+  localStorage.setItem('gpp_app_url', CONFIGURED_API_BASE);
+}
 const API_ORIGIN = API_BASE || window.location.origin;
 const tokenStore = window.sessionStorage;
 const getToken = () => tokenStore.getItem('gpp_access_token') || '';
