@@ -3,71 +3,27 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.onrender.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
+<link rel="stylesheet" href="login.css">
 <title>GitHub Project Pusher — Login</title>
-<style>
-  :root{color-scheme:dark}
-  body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#0f172a;color:#f8fafc}
-  main{width:min(92vw,520px);padding:32px;box-sizing:border-box;border:1px solid #334155;border-radius:18px;background:#111827;box-shadow:0 20px 60px #0005}
-  h1{margin:0 0 10px}.muted{color:#94a3b8}.row{display:flex;gap:10px;margin-top:20px;flex-wrap:wrap}
-  input,button,a{font:inherit}.url{width:100%;box-sizing:border-box;padding:12px 14px;border-radius:10px;border:1px solid #475569;background:#0b1220;color:#fff}
-  button,a{padding:11px 15px;border-radius:10px;text-decoration:none;border:1px solid #475569;cursor:pointer}
-  button{background:#2563eb;color:#fff;border-color:#2563eb}.secondary{background:#1e293b;color:#fff}
-  .error{margin-top:14px;color:#fca5a5;display:none}.hint{font-size:14px;margin-top:12px}.hidden{display:none}
-</style>
 </head>
 <body>
 <main>
   <h1>GitHub Project Pusher</h1>
-  <p id="status" class="muted">Opening GitHub login…</p>
+  <p id="status" class="muted">Preparing secure GitHub login…</p>
   <div id="setup" class="hidden">
-    <p class="muted">This file is being opened directly. Enter the URL where your GitHub Project Pusher server is running.</p>
-    <input id="appUrl" class="url" placeholder="https://your-domain.example" autocomplete="url">
+    <p class="muted">GitHub Pages hosts the frontend separately from the free backend. Enter your backend URL once.</p>
+    <input id="appUrl" class="url" placeholder="https://your-app.onrender.com" autocomplete="url">
     <div class="row">
-      <button id="go">Open GitHub login</button>
+      <button id="go">Continue with GitHub</button>
       <button id="local" class="secondary">Use local server</button>
     </div>
     <p class="hint muted">Local server default: http://127.0.0.1:4173</p>
     <p id="error" class="error"></p>
   </div>
 </main>
-<script>
-(() => {
-  const trimBase = value => String(value || '').trim().replace(/\/+$/, '');
-  const status = document.getElementById('status');
-  const setup = document.getElementById('setup');
-  const input = document.getElementById('appUrl');
-  const error = document.getElementById('error');
-
-  function go(base) {
-    base = trimBase(base);
-    if (!/^https?:\/\//i.test(base)) {
-      error.textContent = 'Please enter a full URL starting with http:// or https://';
-      error.style.display = 'block';
-      return;
-    }
-    localStorage.setItem('gpp_app_url', base);
-    window.location.href = base + '/login';
-  }
-
-  // When hosted by the app, the same-origin /login route is the correct target.
-  if (location.protocol === 'http:' || location.protocol === 'https:') {
-    window.location.replace('/login');
-    return;
-  }
-
-  // Standalone file: use a previously saved server URL, otherwise ask once.
-  const saved = localStorage.getItem('gpp_app_url');
-  if (saved) {
-    status.textContent = 'Opening your GitHub Project Pusher server…';
-    go(saved);
-    return;
-  }
-
-  status.textContent = 'Server address required';
-  setup.classList.remove('hidden');
-  document.getElementById('go').onclick = () => go(input.value);
-  document.getElementById('local').onclick = () => go('http://127.0.0.1:4173');
-})();
-</script>
+<script src="config.js"></script>
+<script src="login.js"></script>
 </body>
 </html>

@@ -1,0 +1,70 @@
+services:
+  - type: web
+    name: github-project-pusher
+    runtime: node
+    plan: free
+    buildCommand: npm install --no-audit --no-fund
+    startCommand: npm start
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: HOST
+        value: 0.0.0.0
+      - key: PORT
+        value: "10000"
+      - key: TRUST_PROXY
+        value: "1"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: COOKIE_SAMESITE
+        value: Lax
+      - key: SYNC_INTERVAL_MS
+        value: "30000"
+      - key: SESSION_TTL_DAYS
+        value: "7"
+      - key: MAX_TOTAL_UPLOAD_MB
+        value: "40"
+      - key: MAX_ARCHIVE_MB
+        value: "45"
+      - key: MAX_EXTRACTED_MB
+        value: "150"
+      - key: MAX_ARCHIVE_ENTRIES
+        value: "10000"
+      - key: MAX_DECOMPRESSION_RATIO
+        value: "20"
+      - key: MAX_SNAPSHOTS_PER_PROJECT
+        value: "10"
+      - key: APP_NAME
+        value: GitHub Project Pusher
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: SESSION_SECRET
+        sync: false
+      - key: TOKEN_ENCRYPTION_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SECRET_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: gpp-private
+      - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: GITHUB_CLIENT_SECRET
+        sync: false
+      - key: GITHUB_CALLBACK_URL
+        sync: false
+      - key: GITHUB_OAUTH_SCOPE
+        value: repo offline_access
+      - key: GITHUB_ALLOW_SIGNUP
+        value: "true"
+      - key: REQUIRE_GITHUB_ALLOWLIST
+        value: "true"
+      - key: ALLOWED_GITHUB_USER_IDS
+        sync: false

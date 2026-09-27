@@ -6,6 +6,9 @@ import os from 'os';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { createClient } from '@supabase/supabase-js';
+import tar from 'tar';
+import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -13,115 +16,104 @@ const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = process.cwd();
 const APPLICATIONS = path.join(ROOT, 'application');
-const APPLICATION_PLATFORMS = { windows: ['.msi', '.exe'], macos: ['.dmg', '.pkg', '.zip'], android: ['.apk', '.aab'], linux: ['.AppImage', '.deb', '.rpm', '.zip'] };
-const DATA = path.join(ROOT, 'data');
-const DB_FILE = path.join(DATA, 'store.json');
-const PROJECTS = path.join(DATA, 'projects');
-const HISTORY = path.join(DATA, 'history');
+const APPLICATION_PLATFORMS = {
+  windows: ['.msi', '.exe'],
+  macos: ['.dmg', '.pkg', '.zip'],
+  android: ['.apk', '.aab'],
+  linux: ['.AppImage', '.deb', '.rpm', '.zip']
+};
+const LOCAL_DATA = path.join(ROOT, 'data');
+const UPLOAD_TEMP = path.join(LOCAL_DATA, 'uploads');
 const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 2000);
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 50) * 1024 * 1024;
-const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 250) * 1024 * 1024;
-const MAX_SNAPSHOTS = Number(process.env.MAX_SNAPSHOTS_PER_PROJECT || 20);
-const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 30) * 24 * 60 * 60 * 1000;
-const SYNC_MS = Number(process.env.SYNC_INTERVAL_MS || 20000);
+const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 40) * 1024 * 1024;
+const MAX_ARCHIVE_SIZE = Number(process.env.MAX_ARCHIVE_MB || 45) * 1024 * 1024;
+const MAX_EXTRACTED_BYTES = Number(process.env.MAX_EXTRACTED_MB || 150) * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = Number(process.env.MAX_ARCHIVE_ENTRIES || 10000);
+const MAX_DECOMPRESSION_RATIO = Number(process.env.MAX_DECOMPRESSION_RATIO || 20);
+const MAX_SNAPSHOTS = Number(process.env.MAX_SNAPSHOTS_PER_PROJECT || 10);
+const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 7) * 24 * 60 * 60 * 1000;
+const LOGIN_CODE_TTL_MS = 2 * 60 * 1000;
+const OAUTH_ATTEMPT_TTL_MS = 10 * 60 * 1000;
+const SSE_TICKET_TTL_MS = 5 * 60 * 1000;
+const SYNC_MS = Number(process.env.SYNC_INTERVAL_MS || 30000);
 const APP_NAME = process.env.APP_NAME || 'GitHub Project Pusher';
-const COOKIE = 'gpp_session';
+const SESSION_COOKIE = 'gpp_session';
+const OAUTH_BINDING_COOKIE = 'gpp_oauth_pre';
 const isProd = process.env.NODE_ENV === 'production';
+const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'gpp-private';
+const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
+const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
+const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
+const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
+const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
-const uploadTemp = path.join(DATA, 'uploads');
-await fs.mkdir(uploadTemp, { recursive: true });
-const upload = multer({ storage: multer.diskStorage({ destination: (_req, _file, cb) => cb(null, uploadTemp), filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${normalizeName(path.basename(file.originalname || 'file'))}`) }), limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE } });
+
+const SUPABASE_SERVER_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const hasSupabase = Boolean(process.env.SUPABASE_URL && SUPABASE_SERVER_KEY);
+if (isProd && !hasSupabase) {
+  throw new Error('Persistent storage is required in production. Set SUPABASE_URL and SUPABASE_SECRET_KEY.');
+}
+
+const supabase = hasSupabase
+  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, { auth: { autoRefreshToken: false, persistSession: false } })
+  : null;
+
+await fs.mkdir(UPLOAD_TEMP, { recursive: true });
+await fs.mkdir(APPLICATIONS, { recursive: true });
+await Promise.all(Object.keys(APPLICATION_PLATFORMS).map(platform => fs.mkdir(path.join(APPLICATIONS, platform), { recursive: true })));
+
+const upload = multer({
+  storage: multer.diskStorage({
+    destination: (_req, _file, cb) => cb(null, UPLOAD_TEMP),
+    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${normalizeName(path.basename(file.originalname || 'file'))}`)
+  }),
+  limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE }
+});
+
+app.use((req, res, next) => {
+  const origin = req.get('Origin');
+  if (origin && allowedOrigin(origin)) {
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, X-Requested-With');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,POST,DELETE,OPTIONS');
+    res.setHeader('Vary', 'Origin');
+  }
+  if (req.method === 'OPTIONS') return res.sendStatus(204);
+  next();
+});
+
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'"],
+      styleSrc: ["'self'"],
+      imgSrc: ["'self'", 'data:'],
+      connectSrc: ["'self'", ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
+      fontSrc: ["'self'"],
+      objectSrc: ["'none'"],
+      baseUri: ["'self'"],
+      formAction: ["'self'", 'https://github.com'],
+      frameAncestors: ["'none'"],
+      workerSrc: ["'self'"]
+    }
+  },
+  referrerPolicy: { policy: 'no-referrer' },
+  hsts: isProd ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false
+}));
+
 app.use(express.json({ limit: '2mb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(ROOT, 'public')));
-await fs.mkdir(DATA, { recursive: true });
-await fs.mkdir(APPLICATIONS, { recursive: true });
-await Promise.all(Object.keys(APPLICATION_PLATFORMS).map(platform => fs.mkdir(path.join(APPLICATIONS, platform), { recursive: true })));
-await fs.mkdir(PROJECTS, { recursive: true });
-await fs.mkdir(HISTORY, { recursive: true });
 
-function secretKey() {
-  const secret = process.env.TOKEN_ENCRYPTION_KEY;
-  if (!secret || !/^[0-9a-fA-F]{64}$/.test(secret)) {
-    console.warn('TOKEN_ENCRYPTION_KEY is missing or invalid. Generate 64 hex characters for production.');
-    return crypto.createHash('sha256').update(process.env.SESSION_SECRET || 'development-only-insecure-secret').digest();
-  }
-  return Buffer.from(secret, 'hex');
-}
-function sessionSecret() {
-  const secret = process.env.SESSION_SECRET;
-  if (!secret || secret.length < 32) console.warn('SESSION_SECRET is missing or shorter than 32 characters. Set a strong secret in production.');
-  return secret || 'development-only-insecure-secret';
-}
-const KEY = secretKey();
-const SESSION_HASH_KEY = crypto.createHash('sha256').update(sessionSecret()).digest();
-function sessionHash(value) { return crypto.createHmac('sha256', SESSION_HASH_KEY).update(value).digest('hex'); }
-
-function encrypt(value) {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', KEY, iv);
-  const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return `${iv.toString('base64url')}.${tag.toString('base64url')}.${encrypted.toString('base64url')}`;
-}
-function decrypt(value) {
-  const [ivS, tagS, dataS] = String(value).split('.');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', KEY, Buffer.from(ivS, 'base64url'));
-  decipher.setAuthTag(Buffer.from(tagS, 'base64url'));
-  return Buffer.concat([decipher.update(Buffer.from(dataS, 'base64url')), decipher.final()]).toString('utf8');
+function supabaseRequired() {
+  if (!supabase) throw new Error('Supabase persistence is not configured.');
 }
 
-async function readDB() {
-  try { return JSON.parse(await fs.readFile(DB_FILE, 'utf8')); }
-  catch { return { users: {}, sessions: {}, projects: {} }; }
-}
-async function writeDB(db) {
-  const temp = `${DB_FILE}.tmp-${crypto.randomUUID()}`;
-  await fs.writeFile(temp, JSON.stringify(db, null, 2));
-  await fs.rename(temp, DB_FILE);
-}
-
-function cookieOptions() {
-  const parts = [`Path=/`, `HttpOnly`, `SameSite=Lax`];
-  if (isProd || process.env.COOKIE_SECURE === 'true') parts.push('Secure');
-  return parts.join('; ');
-}
-function parseCookies(req) {
-  const out = {};
-  const raw = req.headers.cookie || '';
-  for (const pair of raw.split(';')) {
-    const i = pair.indexOf('='); if (i < 0) continue;
-    out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim());
-  }
-  return out;
-}
-async function getSession(req, res) {
-  const db = await readDB();
-  let sid = parseCookies(req)[COOKIE];
-  const key = sid && sessionHash(sid);
-  if (!sid || !db.sessions[key] || (db.sessions[key].createdAt + SESSION_TTL_MS) < Date.now()) {
-    sid = crypto.randomBytes(32).toString('hex');
-    const hashed = sessionHash(sid);
-    await mutateDB(current => { current.sessions[hashed] = { createdAt: Date.now() }; });
-    res.setHeader('Set-Cookie', `${COOKIE}=${sid}; ${cookieOptions()}`);
-  }
-  const fresh = await readDB();
-  return { db: fresh, sid, session: fresh.sessions[sessionHash(sid)] };
-}
-async function authUser(req, res, required = true) {
-  const ctx = await getSession(req, res);
-  if (!ctx.session.userId) {
-    if (required) res.status(401).json({ error: 'Please sign in with GitHub.' });
-    return null;
-  }
-  const user = ctx.db.users[ctx.session.userId];
-  if (!user) {
-    if (required) res.status(401).json({ error: 'Session expired. Please sign in again.' });
-    return null;
-  }
-  return { ...ctx, user };
-}
+function nowIso() { return new Date().toISOString(); }
 function normalizeName(s) {
   return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'project';
 }
@@ -130,18 +122,392 @@ function safeRelative(rel) {
   if (!n || n === '.' || n.startsWith('../') || n.includes('/../') || path.posix.isAbsolute(n)) return null;
   return n;
 }
+function secretKey() {
+  const secret = process.env.TOKEN_ENCRYPTION_KEY;
+  if (!secret) return crypto.createHash('sha256').update(process.env.SESSION_SECRET || 'development-only-insecure-secret').digest();
+  if (/^[0-9a-fA-F]{64}$/.test(secret)) return Buffer.from(secret, 'hex');
+  const decoded = Buffer.from(secret, 'base64');
+  if (decoded.length === 32) return decoded;
+  throw new Error('TOKEN_ENCRYPTION_KEY must be 64 hex characters or a base64-encoded 32-byte key.');
+}
+function sessionSecret() {
+  const secret = process.env.SESSION_SECRET;
+  if (isProd && (!secret || secret.length < 32)) throw new Error('SESSION_SECRET must be at least 32 characters in production.');
+  return secret || 'development-only-insecure-secret';
+}
+const ENCRYPTION_KEY = secretKey();
+const SESSION_HASH_KEY = crypto.createHash('sha256').update(sessionSecret()).digest();
+function hashSecret(value) { return crypto.createHmac('sha256', SESSION_HASH_KEY).update(String(value)).digest('hex'); }
+function randomToken(bytes = 32) { return crypto.randomBytes(bytes).toString('base64url'); }
+function encrypt(value) {
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', ENCRYPTION_KEY, iv);
+  const encrypted = Buffer.concat([cipher.update(String(value), 'utf8'), cipher.final()]);
+  return `${iv.toString('base64url')}.${cipher.getAuthTag().toString('base64url')}.${encrypted.toString('base64url')}`;
+}
+function decrypt(value) {
+  const [ivS, tagS, dataS] = String(value).split('.');
+  if (!ivS || !tagS || !dataS) throw new Error('Encrypted value is malformed.');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', ENCRYPTION_KEY, Buffer.from(ivS, 'base64url'));
+  decipher.setAuthTag(Buffer.from(tagS, 'base64url'));
+  return Buffer.concat([decipher.update(Buffer.from(dataS, 'base64url')), decipher.final()]).toString('utf8');
+}
 function publicBaseUrl(req) {
-  return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`;
+  return String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 }
-function sameOrigin(req) {
-  const origin = req.get('Origin');
-  if (!origin) return true;
-  try { return new URL(origin).origin === new URL(publicBaseUrl(req)).origin; } catch { return false; }
+function allowedOrigin(origin) {
+  try {
+    const normalized = new URL(origin).origin;
+    if (FRONTEND_ORIGIN && normalized === FRONTEND_ORIGIN) return true;
+    if (process.env.PUBLIC_BASE_URL && normalized === new URL(process.env.PUBLIC_BASE_URL).origin) return true;
+  } catch {}
+  return false;
 }
-function requireSameOrigin(req, res, next) {
-  if (!sameOrigin(req)) return res.status(403).json({ error: 'Cross-origin request blocked.' });
-  next();
+function allowedReturnTo(value, req) {
+  if (!value) return null;
+  try {
+    const parsed = new URL(String(value));
+    const own = new URL(publicBaseUrl(req));
+    const allowed = new Set([own.origin, FRONTEND_ORIGIN].filter(Boolean));
+    if (!allowed.has(parsed.origin)) return null;
+    if (!isProd && parsed.hostname === '127.0.0.1') return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch { return null; }
 }
+function parseCookies(req) {
+  const out = {};
+  for (const pair of String(req.headers.cookie || '').split(';')) {
+    const i = pair.indexOf('=');
+    if (i < 0) continue;
+    out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim());
+  }
+  return out;
+}
+function cookieOptions() {
+  const sameSite = process.env.COOKIE_SAMESITE || 'Lax';
+  const secure = isProd || process.env.COOKIE_SECURE === 'true';
+  return `Path=/; HttpOnly; SameSite=${sameSite}${secure ? '; Secure' : ''}`;
+}
+function oauthBindingCookieOptions(maxAgeSeconds = Math.ceil(OAUTH_ATTEMPT_TTL_MS / 1000)) {
+  const secure = isProd || process.env.COOKIE_SECURE === 'true';
+  return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`;
+}
+function clearOAuthBindingCookie() {
+  return `${OAUTH_BINDING_COOKIE}=; ${oauthBindingCookieOptions(0)}`;
+}
+function getBearerToken(req) {
+  const header = req.get('Authorization') || '';
+  return header.startsWith('Bearer ') ? header.slice(7).trim() : null;
+}
+function requestHasBearer(req) { return Boolean(getBearerToken(req)); }
+
+async function queryOne(table, builder) {
+  supabaseRequired();
+  const { data, error } = await builder;
+  if (error) throw new Error(`${table}: ${error.message}`);
+  return data;
+}
+
+function userFromRow(row) {
+  if (!row) return null;
+  return {
+    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar,
+    githubTokenEnc: row.github_token_enc, githubRefreshTokenEnc: row.github_refresh_token_enc,
+    githubExpiresAt: row.github_expires_at ? new Date(row.github_expires_at).getTime() : null,
+    githubRefreshExpiresAt: row.github_refresh_expires_at ? new Date(row.github_refresh_expires_at).getTime() : null
+  };
+}
+function projectFromRow(row) {
+  return {
+    id: row.id, userId: row.user_id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at,
+    syncState: row.sync_state, syncMessage: row.sync_message, repoId: row.repo_id, repoFullName: row.repo_full_name,
+    repoUrl: row.repo_url, remoteUrl: row.remote_url, branch: row.branch, lastPushedAt: row.last_pushed_at,
+    lastPushedCommit: row.last_pushed_commit, lastSyncAt: row.last_sync_at, lastPulledCommit: row.last_pulled_commit,
+    lastCheckedAt: row.last_checked_at, fileCount: row.file_count || 0, storagePath: row.storage_path
+  };
+}
+function projectToRow(p) {
+  return {
+    id: p.id, user_id: p.userId, name: p.name, created_at: p.createdAt, updated_at: p.updatedAt,
+    sync_state: p.syncState || 'local', sync_message: p.syncMessage || null, repo_id: p.repoId == null ? null : String(p.repoId),
+    repo_full_name: p.repoFullName || null, repo_url: p.repoUrl || null, remote_url: p.remoteUrl || null,
+    branch: p.branch || null, last_pushed_at: p.lastPushedAt || null, last_pushed_commit: p.lastPushedCommit || null,
+    last_sync_at: p.lastSyncAt || null, last_pulled_commit: p.lastPulledCommit || null,
+    last_checked_at: p.lastCheckedAt || null, file_count: Number(p.fileCount || 0), storage_path: p.storagePath || null
+  };
+}
+
+async function dbUserUpsert(user) {
+  const row = {
+    id: String(user.id), login: user.login, name: user.name, avatar: user.avatar,
+    github_token_enc: user.githubTokenEnc, github_refresh_token_enc: user.githubRefreshTokenEnc || null,
+    github_expires_at: user.githubExpiresAt ? new Date(user.githubExpiresAt).toISOString() : null,
+    github_refresh_expires_at: user.githubRefreshExpiresAt ? new Date(user.githubRefreshExpiresAt).toISOString() : null,
+    updated_at: nowIso()
+  };
+  await queryOne('users', supabase.from('users').upsert(row, { onConflict: 'id' }));
+  return user;
+}
+async function dbGetUser(userId) {
+  const data = await queryOne('users', supabase.from('users').select('*').eq('id', String(userId)).maybeSingle());
+  return userFromRow(data);
+}
+async function dbGetProject(projectId) {
+  const data = await queryOne('projects', supabase.from('projects').select('*').eq('id', projectId).maybeSingle());
+  return projectFromRow(data);
+}
+async function dbListProjects(userId) {
+  const data = await queryOne('projects', supabase.from('projects').select('*').eq('user_id', String(userId)).order('name', { ascending: true }));
+  return (data || []).map(projectFromRow);
+}
+async function dbUpsertProject(project) {
+  await queryOne('projects', supabase.from('projects').upsert(projectToRow(project), { onConflict: 'id' }));
+  return project;
+}
+async function dbDeleteProject(projectId, userId) {
+  await queryOne('projects', supabase.from('projects').delete().eq('id', projectId).eq('user_id', String(userId)));
+}
+async function dbListUsers() {
+  const data = await queryOne('users', supabase.from('users').select('*'));
+  return (data || []).map(userFromRow);
+}
+
+async function createSession(userId) {
+  const token = randomToken(32);
+  await queryOne('sessions', supabase.from('sessions').insert({ id: hashSecret(token), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString() }));
+  return token;
+}
+async function sessionFromToken(token) {
+  if (!token) return null;
+  const data = await queryOne('sessions', supabase.from('sessions').select('*').eq('id', hashSecret(token)).maybeSingle());
+  if (!data) return null;
+  if (new Date(data.expires_at).getTime() < Date.now()) {
+    await queryOne('sessions', supabase.from('sessions').delete().eq('id', data.id));
+    return null;
+  }
+  const user = await dbGetUser(data.user_id);
+  if (!user) return null;
+  return { sid: data.id, token, user };
+}
+async function deleteSession(token) {
+  if (!token) return;
+  await queryOne('sessions', supabase.from('sessions').delete().eq('id', hashSecret(token)));
+}
+async function getSession(req, res, { createAnonymous = false } = {}) {
+  const bearer = getBearerToken(req);
+  if (bearer) return sessionFromToken(bearer);
+  const cookie = parseCookies(req)[SESSION_COOKIE];
+  if (cookie) {
+    const session = await sessionFromToken(cookie);
+    if (session) return session;
+  }
+  if (!createAnonymous) return null;
+  const token = randomToken(32);
+  await queryOne('sessions', supabase.from('sessions').insert({ id: hashSecret(token), user_id: null, created_at: nowIso(), expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString() }));
+  res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; ${cookieOptions()}`);
+  return { sid: hashSecret(token), token, user: null };
+}
+async function authUser(req, res, required = true) {
+  const session = await getSession(req, res);
+  if (!session?.user) {
+    if (required) res.status(401).json({ error: 'Please sign in with GitHub.' });
+    return null;
+  }
+  return { ...session, user: session.user };
+}
+
+async function createOAuthAttempt(state, codeVerifier, returnTo, browserBinding) {
+  await queryOne('oauth_attempts', supabase.from('oauth_attempts').insert({
+    state_hash: hashSecret(state), code_verifier: codeVerifier, return_to: returnTo,
+    client_cookie_hash: hashSecret(browserBinding),
+    created_at: nowIso(), expires_at: new Date(Date.now() + OAUTH_ATTEMPT_TTL_MS).toISOString()
+  }));
+}
+async function consumeOAuthAttempt(state, browserBinding) {
+  const row = await queryOne('oauth_attempts', supabase.from('oauth_attempts').select('*').eq('state_hash', hashSecret(state)).maybeSingle());
+  if (!row) return null;
+  await queryOne('oauth_attempts', supabase.from('oauth_attempts').delete().eq('state_hash', hashSecret(state)));
+  if (new Date(row.expires_at).getTime() < Date.now()) return null;
+  if (!browserBinding || !row.client_cookie_hash || hashSecret(browserBinding) !== row.client_cookie_hash) return null;
+  return row;
+}
+async function createLoginCode(userId) {
+  const code = randomToken(32);
+  await queryOne('login_codes', supabase.from('login_codes').insert({ code_hash: hashSecret(code), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + LOGIN_CODE_TTL_MS).toISOString() }));
+  return code;
+}
+async function consumeLoginCode(code) {
+  const row = await queryOne('login_codes', supabase.from('login_codes').select('*').eq('code_hash', hashSecret(code)).maybeSingle());
+  if (!row) return null;
+  await queryOne('login_codes', supabase.from('login_codes').delete().eq('code_hash', hashSecret(code)));
+  if (new Date(row.expires_at).getTime() < Date.now()) return null;
+  return row;
+}
+async function createSseTicket(userId) {
+  const ticket = randomToken(24);
+  await queryOne('sse_tickets', supabase.from('sse_tickets').insert({ ticket_hash: hashSecret(ticket), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + SSE_TICKET_TTL_MS).toISOString() }));
+  return ticket;
+}
+async function consumeSseTicket(ticket) {
+  if (!ticket) return null;
+  const row = await queryOne('sse_tickets', supabase.from('sse_tickets').select('*').eq('ticket_hash', hashSecret(ticket)).maybeSingle());
+  if (!row) return null;
+  await queryOne('sse_tickets', supabase.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
+  if (new Date(row.expires_at).getTime() < Date.now()) return null;
+  const user = await dbGetUser(row.user_id);
+  return user ? { user } : null;
+}
+async function cleanupAuthRecords() {
+  const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+  await Promise.all([
+    queryOne('oauth_attempts', supabase.from('oauth_attempts').delete().lt('expires_at', new Date().toISOString())),
+    queryOne('login_codes', supabase.from('login_codes').delete().lt('expires_at', new Date().toISOString())),
+    queryOne('sse_tickets', supabase.from('sse_tickets').delete().lt('expires_at', new Date().toISOString())),
+    queryOne('sessions', supabase.from('sessions').delete().lt('expires_at', new Date().toISOString()))
+  ]).catch(() => {});
+}
+
+async function storageUpload(objectPath, data, contentType = 'application/octet-stream') {
+  supabaseRequired();
+  if (Buffer.byteLength(data) > MAX_ARCHIVE_SIZE) throw new Error(`Stored archive exceeds the ${Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024)} MB free-tier archive limit.`);
+  const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(objectPath, data, { contentType, upsert: true });
+  if (error) throw new Error(`Storage upload failed: ${error.message}`);
+}
+async function storageDownload(objectPath) {
+  supabaseRequired();
+  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).download(objectPath);
+  if (error || !data) throw new Error(`Storage download failed: ${error?.message || 'not found'}`);
+  return Buffer.from(await data.arrayBuffer());
+}
+async function storageRemove(paths) {
+  if (!paths.length) return;
+  const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(paths);
+  if (error) throw new Error(`Storage delete failed: ${error.message}`);
+}
+
+async function createArchive(sourceDir, destination, includeGit = true) {
+  const entries = includeGit ? ['.'] : (await fs.readdir(sourceDir, { withFileTypes: true })).filter(e => e.name !== '.git').map(e => e.name);
+  let entryCount = 0;
+  let uncompressedBytes = 0;
+  await tar.c({
+    gzip: true, file: destination, cwd: sourceDir, portable: true,
+    filter: (_entryPath, stat) => {
+      entryCount += 1;
+      if (entryCount > MAX_ARCHIVE_ENTRIES) throw new Error(`Project contains more than ${MAX_ARCHIVE_ENTRIES} archive entries.`);
+      if (stat.isSymbolicLink() || stat.isSocket() || stat.isBlockDevice() || stat.isCharacterDevice() || stat.isFIFO()) {
+        throw new Error('Project archives cannot contain symbolic links, device files, sockets, or FIFOs.');
+      }
+      if (stat.isFile()) {
+        uncompressedBytes += Number(stat.size || 0);
+        if (uncompressedBytes > MAX_EXTRACTED_BYTES) throw new Error(`Project contents exceed the ${Math.round(MAX_EXTRACTED_BYTES / 1024 / 1024)} MB expanded archive limit.`);
+      }
+      return true;
+    }
+  }, entries.length ? entries : ['.']);
+  const stat = await fs.stat(destination);
+  if (stat.size > MAX_ARCHIVE_SIZE) throw new Error(`Project archive exceeds ${Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024)} MB. Reduce the project size or increase the configured storage limit on a paid storage plan.`);
+  return stat.size;
+}
+async function extractArchive(buffer, destination) {
+  const archive = path.join(os.tmpdir(), `gpp-archive-${crypto.randomUUID()}.tgz`);
+  await fs.writeFile(archive, buffer);
+  try {
+    let entryCount = 0;
+    let uncompressedBytes = 0;
+    await tar.x({
+      file: archive, cwd: destination, strict: true, preservePaths: false,
+      maxDecompressionRatio: MAX_DECOMPRESSION_RATIO,
+      maxDepth: 64,
+      filter: (_entryPath, entry) => {
+        entryCount += 1;
+        if (entryCount > MAX_ARCHIVE_ENTRIES) throw new Error(`Archive contains more than ${MAX_ARCHIVE_ENTRIES} entries.`);
+        if (['SymbolicLink', 'Link', 'CharacterDevice', 'BlockDevice', 'FIFO'].includes(entry.type)) throw new Error('Archive contains unsupported link/device entries.');
+        uncompressedBytes += Number(entry.size || 0);
+        if (uncompressedBytes > MAX_EXTRACTED_BYTES) throw new Error(`Expanded archive exceeds the ${Math.round(MAX_EXTRACTED_BYTES / 1024 / 1024)} MB limit.`);
+        return true;
+      }
+    });
+  } finally {
+    await fs.rm(archive, { force: true });
+  }
+}
+async function withWorkspace(project, fn) {
+  const work = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-project-'));
+  try {
+    if (project?.storagePath) {
+      const archive = await storageDownload(project.storagePath);
+      await extractArchive(archive, work);
+    }
+    return await fn(work);
+  } finally {
+    await fs.rm(work, { recursive: true, force: true }).catch(() => {});
+  }
+}
+async function persistWorkingTree(project, work) {
+  const archive = path.join(os.tmpdir(), `gpp-working-${crypto.randomUUID()}.tgz`);
+  try {
+    await createArchive(work, archive, true);
+    const buf = await fs.readFile(archive);
+    const objectPath = project.storagePath || `projects/${project.userId}/${project.id}/working.tgz`;
+    await storageUpload(objectPath, buf, 'application/gzip');
+    const stat = await fs.stat(archive);
+    return { storagePath: objectPath, archiveBytes: stat.size };
+  } finally {
+    await fs.rm(archive, { force: true }).catch(() => {});
+  }
+}
+async function countFiles(root) {
+  let count = 0;
+  async function walk(dir) {
+    let entries = [];
+    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      if (e.name === '.git') continue;
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) await walk(p); else count++;
+    }
+  }
+  await walk(root);
+  return count;
+}
+async function sha256File(file) {
+  return crypto.createHash('sha256').update(await fs.readFile(file)).digest('hex');
+}
+async function snapshotProject(project, work, label) {
+  const archive = path.join(os.tmpdir(), `gpp-snapshot-${crypto.randomUUID()}.tgz`);
+  try {
+    await createArchive(work, archive, false);
+    const hash = await sha256File(archive);
+    const existing = await queryOne('snapshots', supabase.from('snapshots').select('*').eq('project_id', project.id).eq('content_hash', hash).order('created_at', { ascending: false }).limit(1).maybeSingle());
+    if (existing) return existing;
+    const stamp = new Date().toISOString().replaceAll(':', '-');
+    const objectPath = `snapshots/${project.userId}/${project.id}/${stamp}-${normalizeName(label)}.tgz`;
+    await storageUpload(objectPath, await fs.readFile(archive), 'application/gzip');
+    const row = { id: crypto.randomUUID(), project_id: project.id, user_id: project.userId, label, created_at: nowIso(), storage_path: objectPath, content_hash: hash };
+    await queryOne('snapshots', supabase.from('snapshots').insert(row));
+    const older = await queryOne('snapshots', supabase.from('snapshots').select('*').eq('project_id', project.id).order('created_at', { ascending: false }));
+    const stale = (older || []).slice(MAX_SNAPSHOTS);
+    if (stale.length) {
+      await storageRemove(stale.map(s => s.storage_path));
+      await queryOne('snapshots', supabase.from('snapshots').delete().in('id', stale.map(s => s.id)));
+    }
+    return row;
+  } finally {
+    await fs.rm(archive, { force: true }).catch(() => {});
+  }
+}
+async function listSnapshots(projectId, userId) {
+  const data = await queryOne('snapshots', supabase.from('snapshots').select('id,label,created_at,content_hash').eq('project_id', projectId).eq('user_id', String(userId)).order('created_at', { ascending: false }));
+  return (data || []).map(row => ({ id: row.id, label: row.label, createdAt: row.created_at, hash: row.content_hash }));
+}
+async function updateProject(projectId, userId, patch) {
+  const current = await dbGetProject(projectId);
+  if (!current || current.userId !== String(userId)) throw new Error('Project not found.');
+  const updated = { ...current, ...patch, updatedAt: nowIso() };
+  await dbUpsertProject(updated);
+  return updated;
+}
+
 function githubHeaders(token) {
   return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': APP_NAME };
 }
@@ -156,94 +522,78 @@ async function userToken(user) {
   if (!user.githubTokenEnc) return null;
   if (user.githubExpiresAt && user.githubExpiresAt - Date.now() < 60_000 && user.githubRefreshTokenEnc) {
     const refresh = decrypt(user.githubRefreshTokenEnc);
-    const response = await fetch('https://github.com/login/oauth/access_token', { method:'POST', headers:{Accept:'application/json','Content-Type':'application/json'}, body:JSON.stringify({client_id:process.env.GITHUB_CLIENT_ID,client_secret:process.env.GITHUB_CLIENT_SECRET,grant_type:'refresh_token',refresh_token:refresh}) });
+    const response = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, grant_type: 'refresh_token', refresh_token: refresh })
+    });
     const data = await response.json();
     if (!response.ok || data.error || !data.access_token) throw new Error(data.error_description || 'GitHub token refresh failed. Please reconnect GitHub.');
-    await mutateDB(db => { const u=db.users[user.id]; if (!u) return; u.githubTokenEnc=encrypt(data.access_token); u.githubRefreshTokenEnc=data.refresh_token ? encrypt(data.refresh_token) : u.githubRefreshTokenEnc; u.githubExpiresAt=data.expires_in ? Date.now()+Number(data.expires_in)*1000 : null; u.githubRefreshExpiresAt=data.refresh_token_expires_in ? Date.now()+Number(data.refresh_token_expires_in)*1000 : u.githubRefreshExpiresAt; u.updatedAt=new Date().toISOString(); });
     user.githubTokenEnc = encrypt(data.access_token);
     user.githubRefreshTokenEnc = data.refresh_token ? encrypt(data.refresh_token) : user.githubRefreshTokenEnc;
-    user.githubExpiresAt = data.expires_in ? Date.now()+Number(data.expires_in)*1000 : null;
-    user.githubRefreshExpiresAt = data.refresh_token_expires_in ? Date.now()+Number(data.refresh_token_expires_in)*1000 : user.githubRefreshExpiresAt;
+    user.githubExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
+    user.githubRefreshExpiresAt = data.refresh_token_expires_in ? Date.now() + Number(data.refresh_token_expires_in) * 1000 : user.githubRefreshExpiresAt;
+    await dbUserUpsert(user);
     return data.access_token;
   }
   return decrypt(user.githubTokenEnc);
 }
-function projectDir(userId, projectId) { return path.join(PROJECTS, normalizeName(userId), projectId); }
-function historyDir(userId, projectId) { return path.join(HISTORY, normalizeName(userId), projectId); }
-async function saveDB(db) { await writeDB(db); }
-let dbMutationQueue = Promise.resolve();
-function mutateDB(mutator) {
-  const task = dbMutationQueue.then(async () => {
-    const db = await readDB();
-    const result = await mutator(db);
-    await saveDB(db);
-    return result;
-  });
-  dbMutationQueue = task.catch(() => {});
-  return task;
-}
-async function projectListFor(userId) {
-  const db = await readDB();
-  return Object.values(db.projects).filter(p => p.userId === userId).sort((a,b) => a.name.localeCompare(b.name));
-}
-async function countFiles(root) {
-  let count = 0;
-  async function walk(dir) {
-    let entries = [];
-    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      if (e.name === '.git') continue;
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) await walk(p); else count++;
-    }
-  }
-  await walk(root); return count;
-}
-function broadcastClient(res, payload) { try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {} }
-const clients = new Map();
-function broadcast(userId, payload) { for (const [res, uid] of clients.entries()) if (uid === userId) broadcastClient(res, payload); }
 
+function ensureRequestProtection(req, res, next) {
+  if (requestHasBearer(req)) return next();
+  const origin = req.get('Origin');
+  if (!origin || allowedOrigin(origin)) return next();
+  return res.status(403).json({ error: 'Cross-origin request blocked.' });
+}
+
+async function sanitizeGitRepository(dir) {
+  const gitPath = path.join(dir, '.git');
+  let stat;
+  try { stat = await fs.lstat(gitPath); } catch { return false; }
+  if (!stat.isDirectory()) throw new Error('Unsupported .git layout: linked/worktree repositories are not accepted.');
+  await fs.rm(path.join(gitPath, 'config'), { force: true });
+  await fs.rm(path.join(gitPath, 'hooks'), { recursive: true, force: true });
+  await runGit(dir, ['init']);
+  await runGit(dir, ['config', 'core.hooksPath', os.devNull]);
+  await runGit(dir, ['config', 'commit.gpgSign', 'false']);
+  await runGit(dir, ['config', 'tag.gpgSign', 'false']);
+  return true;
+}
 async function ensureGit(dir, cloneUrl) {
   await fs.mkdir(dir, { recursive: true });
-  let initialized = false;
-  try { await fs.access(path.join(dir, '.git')); }
-  catch { await runGit(dir, ['init']); initialized = true; }
+  const initialized = !(await sanitizeGitRepository(dir));
+  if (initialized) await runGit(dir, ['init']);
+  await runGit(dir, ['config', 'core.hooksPath', os.devNull]);
   await runGit(dir, ['config', 'user.name', APP_NAME]);
   await runGit(dir, ['config', 'user.email', 'github-project-pusher@localhost']);
-  try { await runGit(dir, ['remote', 'get-url', 'origin']); await runGit(dir, ['remote', 'set-url', 'origin', cloneUrl]); }
-  catch { await runGit(dir, ['remote', 'add', 'origin', cloneUrl]); }
+  if (cloneUrl) {
+    try { await runGit(dir, ['remote', 'get-url', 'origin']); await runGit(dir, ['remote', 'set-url', 'origin', cloneUrl]); }
+    catch { await runGit(dir, ['remote', 'add', 'origin', cloneUrl]); }
+  }
   return initialized;
 }
-function askpassScript() {
-  return path.join(os.tmpdir(), `gpp-askpass-${crypto.randomUUID()}.cjs`);
-}
+function askpassScript() { return path.join(os.tmpdir(), `gpp-askpass-${crypto.randomUUID()}.cjs`); }
 async function withGitAuth(token, fn) {
   const file = askpassScript();
   await fs.writeFile(file, `const p=process.argv.slice(2).join(' ');process.stdout.write(/username/i.test(p)?'x-access-token':(process.env.GH_TOKEN||''));\n`);
   try { await fs.chmod(file, 0o700); return await fn({ GIT_ASKPASS: file, GH_TOKEN: token, GIT_TERMINAL_PROMPT: '0' }); }
   finally { await fs.rm(file, { force: true }); }
 }
-async function runGit(cwd, args, env = {}) { return execFileAsync('git', args, { cwd, env: { ...process.env, ...env }, maxBuffer: 12 * 1024 * 1024 }); }
+async function runGit(cwd, args, env = {}) {
+  return execFileAsync('git', args, {
+    cwd,
+    env: {
+      ...process.env,
+      GIT_CONFIG_NOSYSTEM: '1',
+      GIT_CONFIG_GLOBAL: os.devNull,
+      GIT_CONFIG_SYSTEM: os.devNull,
+      GIT_TERMINAL_PROMPT: '0',
+      ...env
+    },
+    maxBuffer: 12 * 1024 * 1024
+  });
+}
 async function statusPorcelain(dir) { return (await runGit(dir, ['status', '--porcelain'])).stdout.trim(); }
 async function rev(dir, name) { try { return (await runGit(dir, ['rev-parse', name])).stdout.trim(); } catch { return null; } }
-async function snapshot(userId, projectId, label) {
-  const source = projectDir(userId, projectId);
-  const stamp = new Date().toISOString().replaceAll(':', '-');
-  const dest = path.join(historyDir(userId, projectId), `${stamp}-${label}`);
-  await fs.mkdir(path.dirname(dest), { recursive: true });
-  await fs.cp(source, dest, { recursive: true, filter: p => !p.split(path.sep).includes('.git') });
-  const root = historyDir(userId, projectId);
-  const entries = await fs.readdir(root, { withFileTypes: true }).catch(() => []);
-  const dirs = entries.filter(e => e.isDirectory()).map(e => e.name).sort().reverse();
-  for (const stale of dirs.slice(MAX_SNAPSHOTS)) await fs.rm(path.join(root, stale), { recursive: true, force: true });
-  return dest;
-}
-async function updateProject(projectId, patch) {
-  const db = await readDB();
-  db.projects[projectId] = { ...db.projects[projectId], ...patch, updatedAt: new Date().toISOString() };
-  await saveDB(db);
-  return db.projects[projectId];
-}
 
 function applicationFileInfo(platform, name, stat) {
   const encodedName = encodeURIComponent(name);
@@ -253,161 +603,366 @@ async function listApplications() {
   const out = [];
   for (const [platform, extensions] of Object.entries(APPLICATION_PLATFORMS)) {
     const dir = path.join(APPLICATIONS, platform);
-    let entries = [];
-    try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { continue; }
+    const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
     for (const entry of entries) {
       if (!entry.isFile() || entry.name.startsWith('.')) continue;
-      const lower = entry.name.toLowerCase();
-      const ext = extensions.find(x => lower.endsWith(x.toLowerCase()));
-      if (!ext) continue;
-      try { const stat = await fs.stat(path.join(dir, entry.name)); out.push(applicationFileInfo(platform, entry.name, stat)); } catch {}
+      if (!extensions.some(ext => entry.name.toLowerCase().endsWith(ext.toLowerCase()))) continue;
+      try { out.push(applicationFileInfo(platform, entry.name, await fs.stat(path.join(dir, entry.name)))); } catch {}
     }
   }
-  return out.sort((a,b) => b.modifiedAt.localeCompare(a.modifiedAt));
+  return out.sort((a, b) => b.modifiedAt.localeCompare(a.modifiedAt));
 }
 function validApplication(platform, name) {
   const extensions = APPLICATION_PLATFORMS[platform];
-  if (!extensions || !name || path.basename(name) !== name) return false;
-  const lower = name.toLowerCase();
-  return extensions.some(ext => lower.endsWith(ext.toLowerCase()));
+  return Boolean(extensions && name && path.basename(name) === name && extensions.some(ext => name.toLowerCase().endsWith(ext.toLowerCase())));
 }
 
-app.get('/api/auth/me', async (req,res) => {
-  const a = await authUser(req,res,false);
-  if (!a) return res.json({ authenticated:false });
-  res.json({ authenticated:true, user:{ login:a.user.login, name:a.user.name, avatar:a.user.avatar } });
-});
-app.get('/login', (_req,res) => res.redirect('/api/auth/login'));
-app.get('/api/auth/login', async (req,res) => {
-  if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
-  const ctx = await getSession(req,res);
-  const state = crypto.randomBytes(24).toString('hex');
-  await mutateDB(db => { const session = db.sessions[sessionHash(ctx.sid)]; if (session) session.oauthState = state; });
-  const redirect = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
-  const scope = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
-  const u = new URL('https://github.com/login/oauth/authorize');
-  u.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
-  u.searchParams.set('redirect_uri', redirect);
-  u.searchParams.set('scope', scope);
-  u.searchParams.set('state', state);
-  res.redirect(u.toString());
-});
-app.get('/auth/github/callback', async (req,res) => {
+const clients = new Map();
+function broadcastClient(res, payload) { try { res.write(`data: ${JSON.stringify(payload)}\n\n`); } catch {} }
+function broadcast(userId, payload) { for (const [res, uid] of clients.entries()) if (uid === String(userId)) broadcastClient(res, payload); }
+
+const projectLocks = new Map();
+async function withProjectLock(projectId, fn) {
+  const previous = projectLocks.get(projectId) || Promise.resolve();
+  let current;
+  current = previous.then(fn).finally(() => {
+    if (projectLocks.get(projectId) === current) projectLocks.delete(projectId);
+  });
+  projectLocks.set(projectId, current);
+  return current;
+}
+
+app.get('/api/auth/me', async (req, res) => {
   try {
-    const ctx = await getSession(req,res);
-    if (!req.query.code || !req.query.state || req.query.state !== ctx.session.oauthState) return res.status(400).send('Invalid OAuth state.');
-    const tokenData = await fetch('https://github.com/login/oauth/access_token', { method:'POST', headers:{Accept:'application/json','Content-Type':'application/json'}, body:JSON.stringify({client_id:process.env.GITHUB_CLIENT_ID,client_secret:process.env.GITHUB_CLIENT_SECRET,code:req.query.code,state:req.query.state,redirect_uri:process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`}) }).then(async r => { const d=await r.json(); if(!r.ok || d.error) throw new Error(d.error_description || 'OAuth exchange failed.'); return d; });
+    const a = await authUser(req, res, false);
+    if (!a) return res.json({ authenticated: false });
+    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
+app.get('/api/auth/login', async (req, res) => {
+  try {
+    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
+    supabaseRequired();
+    const returnTo = allowedReturnTo(req.query.return_to, req);
+    if (req.query.return_to && !returnTo) return res.status(400).send('Invalid return URL.');
+    const state = randomToken(24);
+    const codeVerifier = randomToken(32);
+    const browserBinding = randomToken(24);
+    const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    await createOAuthAttempt(state, codeVerifier, returnTo, browserBinding);
+    res.setHeader('Set-Cookie', `${OAUTH_BINDING_COOKIE}=${browserBinding}; ${oauthBindingCookieOptions()}`);
+    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+    const u = new URL('https://github.com/login/oauth/authorize');
+    u.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
+    u.searchParams.set('redirect_uri', redirectUri);
+    u.searchParams.set('scope', GITHUB_SCOPE);
+    u.searchParams.set('state', state);
+    u.searchParams.set('code_challenge', challenge);
+    u.searchParams.set('code_challenge_method', 'S256');
+    u.searchParams.set('allow_signup', process.env.GITHUB_ALLOW_SIGNUP === 'false' ? 'false' : 'true');
+    res.redirect(u.toString());
+  } catch (e) { res.status(500).send(`GitHub sign-in setup failed: ${e.message}`); }
+});
+app.get('/auth/github/callback', async (req, res) => {
+  try {
+    supabaseRequired();
+    if (!req.query.code || !req.query.state) return res.status(400).send('Missing OAuth code/state.');
+    const browserBinding = parseCookies(req)[OAUTH_BINDING_COOKIE];
+    const attempt = await consumeOAuthAttempt(String(req.query.state), browserBinding);
+    if (!attempt) {
+      res.setHeader('Set-Cookie', clearOAuthBindingCookie());
+      return res.status(400).send('Invalid, expired, or browser-mismatched OAuth state.');
+    }
+    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+      method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.query.code, state: req.query.state, redirect_uri: redirectUri, code_verifier: attempt.code_verifier })
+    });
+    const tokenData = await tokenResponse.json();
+    if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) throw new Error(tokenData.error_description || 'OAuth exchange failed.');
     const ghUser = await githubFetch('https://api.github.com/user', { headers: githubHeaders(tokenData.access_token) });
-    await mutateDB(db => { db.users[ghUser.id] = { id:String(ghUser.id), login:ghUser.login, name:ghUser.name || ghUser.login, avatar:ghUser.avatar_url, githubTokenEnc:encrypt(tokenData.access_token), githubRefreshTokenEnc:tokenData.refresh_token ? encrypt(tokenData.refresh_token) : undefined, githubExpiresAt: tokenData.expires_in ? Date.now() + Number(tokenData.expires_in) * 1000 : null, githubRefreshExpiresAt: tokenData.refresh_token_expires_in ? Date.now() + Number(tokenData.refresh_token_expires_in) * 1000 : null, updatedAt:new Date().toISOString() }; db.sessions[sessionHash(ctx.sid)] = { ...db.sessions[sessionHash(ctx.sid)], userId:String(ghUser.id), oauthState:null }; });
-    res.redirect('/');
+    const userId = String(ghUser.id);
+    if (REQUIRE_GITHUB_ALLOWLIST && !ALLOWED_GITHUB_USER_IDS.has(userId)) return res.status(403).send('This GitHub account is not authorized to use this application.');
+    const user = {
+      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url,
+      githubTokenEnc: encrypt(tokenData.access_token),
+      githubRefreshTokenEnc: tokenData.refresh_token ? encrypt(tokenData.refresh_token) : null,
+      githubExpiresAt: tokenData.expires_in ? Date.now() + Number(tokenData.expires_in) * 1000 : null,
+      githubRefreshExpiresAt: tokenData.refresh_token_expires_in ? Date.now() + Number(tokenData.refresh_token_expires_in) * 1000 : null
+    };
+    await dbUserUpsert(user);
+    if (attempt.return_to) {
+      const code = await createLoginCode(user.id);
+      const target = new URL(attempt.return_to);
+      target.searchParams.set('code', code);
+      res.setHeader('Set-Cookie', clearOAuthBindingCookie());
+      return res.redirect(target.toString());
+    }
+    const token = await createSession(user.id);
+    res.setHeader('Set-Cookie', [clearOAuthBindingCookie(), `${SESSION_COOKIE}=${token}; ${cookieOptions()}`]);
+    return res.redirect('/');
   } catch (e) { res.status(400).send(`GitHub sign-in failed: ${e.message}`); }
 });
-app.post('/api/auth/logout', requireSameOrigin, async (req,res) => { const ctx=await getSession(req,res); await mutateDB(db => { delete db.sessions[sessionHash(ctx.sid)]; }); res.setHeader('Set-Cookie', `${COOKIE}=; ${cookieOptions()}; Max-Age=0`); res.json({ok:true}); });
+app.post('/api/auth/exchange', ensureRequestProtection, async (req, res) => {
+  try {
+    const code = String(req.body?.code || '');
+    if (!code) return res.status(400).json({ error: 'Missing login code.' });
+    const row = await consumeLoginCode(code);
+    if (!row) return res.status(401).json({ error: 'Login code is invalid or expired.' });
+    const token = await createSession(row.user_id);
+    const user = await dbGetUser(row.user_id);
+    return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar } });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
+  try {
+    const bearer = getBearerToken(req);
+    const cookie = parseCookies(req)[SESSION_COOKIE];
+    await deleteSession(bearer || cookie);
+    if (cookie) res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; ${cookieOptions()}; Max-Age=0`);
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
-app.get('/api/applications', async (_req,res) => { try { res.setHeader('Cache-Control','no-store'); res.json(await listApplications()); } catch (e) { res.status(500).json({error:e.message}); } });
-app.get('/api/applications/download/:platform/:name', async (req,res) => {
+app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/applications/download/:platform/:name', async (req, res) => {
   const { platform, name } = req.params;
-  if (!validApplication(platform, name)) return res.status(404).json({error:'Application build not found.'});
+  if (!validApplication(platform, name)) return res.status(404).json({ error: 'Application build not found.' });
   const file = path.join(APPLICATIONS, platform, name);
-  try { await fs.access(file); res.download(file, name); } catch { res.status(404).json({error:'Application build not found.'}); }
+  try { await fs.access(file); res.download(file, name); } catch { res.status(404).json({ error: 'Application build not found.' }); }
 });
 
-app.get('/api/projects', async (req,res) => { const a=await authUser(req,res); if(!a)return; const db=await readDB(); const list=Object.values(db.projects).filter(p=>p.userId===a.user.id); for(const p of list){p.files=await countFiles(projectDir(a.user.id,p.id));} res.json(list.sort((x,y)=>x.name.localeCompare(y.name))); });
-app.get('/api/events', async (req,res) => { const a=await authUser(req,res); if(!a)return; res.setHeader('Content-Type','text/event-stream'); res.setHeader('Cache-Control','no-cache, no-transform'); res.setHeader('Connection','keep-alive'); res.setHeader('X-Accel-Buffering','no'); res.flushHeaders?.(); clients.set(res,a.user.id); broadcastClient(res,{type:'connected'}); const heartbeat=setInterval(()=>{ try{res.write(': keep-alive\n\n');}catch{} },25000); req.on('close',()=>{clearInterval(heartbeat);clients.delete(res);}); });
-
-app.post('/api/projects', requireSameOrigin, (req,res,next) => { const len = Number(req.headers['content-length'] || 0); if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({error:`Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.`}); next(); }, upload.array('files', MAX_FILES), async (req,res) => {
-  const a=await authUser(req,res); if(!a)return;
+app.get('/api/events/ticket', async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  try { res.json({ ticket: await createSseTicket(a.user.id) }); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/events', async (req, res) => {
   try {
-    const id=crypto.randomUUID(); const first=req.files?.[0]?.originalname || 'project'; const name=normalizeName(req.body.projectName || first.split(/[\\/]/)[0]); const dir=projectDir(a.user.id,id); await fs.mkdir(dir,{recursive:true});
-    let totalBytes = 0;
-    for(const file of req.files || []) {
-      totalBytes += Number(file.size || 0);
-      if(totalBytes > MAX_TOTAL_UPLOAD) throw new Error(`Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.`);
-      const rel=safeRelative(file.originalname);
-      if(!rel) continue;
-      const target=path.join(dir,rel);
-      if(!target.startsWith(dir+path.sep)) continue;
-      await fs.mkdir(path.dirname(target),{recursive:true});
-      await fs.rename(file.path,target);
+    let auth = null;
+    if (req.query.ticket) auth = await consumeSseTicket(String(req.query.ticket));
+    else auth = await authUser(req, res, false);
+    if (!auth?.user) return res.status(401).json({ error: 'Not authenticated.' });
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders?.();
+    clients.set(res, auth.user.id);
+    broadcastClient(res, { type: 'connected' });
+    const heartbeat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch {} }, 25000);
+    req.on('close', () => { clearInterval(heartbeat); clients.delete(res); });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/projects', async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  try {
+    const list = await dbListProjects(a.user.id);
+    res.json(list.map(p => ({ ...p, files: p.fileCount })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
+  const len = Number(req.headers['content-length'] || 0);
+  if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.` });
+  next();
+}, upload.array('files', MAX_FILES), async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  let workspace = null;
+  try {
+    const files = req.files || [];
+    if (!files.length) throw new Error('Choose at least one file.');
+    let total = 0;
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-upload-'));
+    for (const file of files) {
+      total += Number(file.size || 0);
+      if (total > MAX_TOTAL_UPLOAD) throw new Error(`Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`);
+      const rel = safeRelative(file.originalname);
+      if (!rel) continue;
+      const target = path.join(workspace, rel);
+      if (!target.startsWith(workspace + path.sep)) continue;
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.rename(file.path, target);
     }
-    for(const file of req.files || []) { if(file.path) await fs.rm(file.path,{force:true}); }
-    const now=new Date().toISOString(); const saved=await mutateDB(db=>{db.projects[id]={id,userId:a.user.id,name,createdAt:now,updatedAt:now,syncState:'local'}; return db.projects[id];}); broadcast(a.user.id,{type:'projects-changed',projectId:id}); res.json(saved);
-  } catch(e) { await fs.rm(typeof dir !== 'undefined' ? dir : '',{recursive:true,force:true}).catch(()=>{}); for(const file of req.files || []) { if(file.path) await fs.rm(file.path,{force:true}).catch(()=>{}); } res.status(500).json({error:e.message}); }
+    const id = crypto.randomUUID();
+    const first = files[0]?.originalname || 'project';
+    const name = normalizeName(req.body.projectName || first.split(/[\\/]/)[0]);
+    const project = { id, userId: a.user.id, name, createdAt: nowIso(), updatedAt: nowIso(), syncState: 'local', syncMessage: 'Stored in persistent cloud storage.', fileCount: await countFiles(workspace), storagePath: `projects/${a.user.id}/${id}/working.tgz` };
+    await withProjectLock(id, async () => { await persistWorkingTree(project, workspace); await dbUpsertProject(project); });
+    broadcast(a.user.id, { type: 'projects-changed', projectId: id });
+    res.json({ ...project, files: project.fileCount });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  } finally {
+    for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
+    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
+  }
 });
-app.delete('/api/projects/:id', requireSameOrigin, async (req,res) => { const a=await authUser(req,res); if(!a)return; const id=req.params.id; try { const db=await readDB(); const p=db.projects[id]; if(!p || p.userId!==a.user.id) return res.status(404).json({error:'Project not found.'}); await fs.rm(projectDir(a.user.id,id),{recursive:true,force:true}); await mutateDB(current=>{ delete current.projects[id]; }); broadcast(a.user.id,{type:'projects-changed'}); res.json({ok:true}); } catch(e){res.status(500).json({error:e.message});} });
-app.get('/api/projects/:id/history', async(req,res)=>{const a=await authUser(req,res);if(!a)return;const db=await readDB();const p=db.projects[req.params.id];if(!p||p.userId!==a.user.id)return res.status(404).json({error:'Project not found.'});let out=[];try{out=(await fs.readdir(historyDir(a.user.id,p.id),{withFileTypes:true})).filter(x=>x.isDirectory()).map(x=>x.name).sort().reverse();}catch{}res.json(out);});
-
-app.get('/api/github/repos', async(req,res)=>{const a=await authUser(req,res);if(!a)return;try{const token=await userToken(a.user);const repos=[];for(let page=1;page<=10;page++){const data=await githubFetch(`https://api.github.com/user/repos?per_page=100&sort=updated&page=${page}`,{headers:githubHeaders(token)});repos.push(...data);if(data.length<100)break;}res.json(repos.map(r=>({id:r.id,name:r.name,full_name:r.full_name,private:r.private,clone_url:r.clone_url,default_branch:r.default_branch,html_url:r.html_url})));}catch(e){res.status(502).json({error:e.message});}});
-app.post('/api/github/push', requireSameOrigin, async(req,res)=>{
-  const a=await authUser(req,res);if(!a)return;
-  const {projectId,repoId,repoName,visibility='private',branch='main'}=req.body||{}; if(!projectId)return res.status(400).json({error:'Select a project.'});
-  const db=await readDB(); const p=db.projects[projectId]; if(!p||p.userId!==a.user.id)return res.status(404).json({error:'Project not found.'});
-  const dir=projectDir(a.user.id,p.id); const token=await userToken(a.user); try {
-    let repo;
-    if(repoId) repo=await githubFetch(`https://api.github.com/repositories/${repoId}`,{headers:githubHeaders(token)});
-    else repo=await githubFetch('https://api.github.com/user/repos',{method:'POST',headers:{...githubHeaders(token),'Content-Type':'application/json'},body:JSON.stringify({name:normalizeName(repoName||p.name),private:visibility!=='public',auto_init:false})});
-    await snapshot(a.user.id,p.id,'before-push');
-    await ensureGit(dir,repo.clone_url);
-    const dirty=await statusPorcelain(dir);
-    await withGitAuth(token, async env=>{
-      await runGit(dir,['fetch','origin'],env).catch(()=>{});
-      const remoteBranch=repo.default_branch || branch;
-      if(!dirty){
-        const remoteRef=await rev(dir,`origin/${remoteBranch}`);
-        const head=await rev(dir,'HEAD');
-        if(remoteRef && !head) throw new Error('Selected repository already has history. Add it to a fresh repository or pull/merge it first.');
-      }
-      await runGit(dir,['add','-A'],env);
-      let changes=true; try{await runGit(dir,['diff','--cached','--quiet'],env);changes=false;}catch{}
-      if(changes) await runGit(dir,['commit','-m',`Sync from ${APP_NAME} ${new Date().toISOString()}`],env);
-      await runGit(dir,['branch','-M',branch],env);
-      await runGit(dir,['push','-u','origin',branch],env);
-    });
-    await snapshot(a.user.id,p.id,'after-push');
-    const commit=await rev(dir,'HEAD'); const updated=await updateProject(p.id,{repoId:repo.id,repoFullName:repo.full_name,repoUrl:repo.html_url,remoteUrl:repo.clone_url,branch,lastPushedAt:new Date().toISOString(),lastPushedCommit:commit,syncState:'synced',syncMessage:'Push completed.'}); broadcast(a.user.id,{type:'project-updated',projectId:p.id,reason:'push'}); res.json({ok:true,repo:{full_name:repo.full_name,html_url:repo.html_url},project:updated});
-  } catch(e){ await updateProject(p.id,{syncState:'error',syncMessage:e.stderr||e.message}); res.status(500).json({error:e.stderr||e.message||'Push failed.'}); }
-});
-
-async function syncProjectForUser(db,user,p){
-  if(!p.repoFullName||!p.branch)return;
-  const token=await userToken(user); if(!token)return; const dir=projectDir(user.id,p.id);
+app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
   try {
-    await ensureGit(dir,p.remoteUrl);
-    const dirty=await statusPorcelain(dir); const before=await rev(dir,'HEAD');
-    await withGitAuth(token,env=>runGit(dir,['fetch','origin',p.branch],env));
-    const remote=await rev(dir,`origin/${p.branch}`); if(!remote || remote===before) return;
-    if(dirty){ await updateProject(p.id,{syncState:'conflict',syncMessage:'Remote changes detected but local edits were left untouched.',lastCheckedAt:new Date().toISOString()}); broadcast(user.id,{type:'sync-conflict',projectId:p.id}); return; }
-    await snapshot(user.id,p.id,'before-pull');
-    await withGitAuth(token,env=>runGit(dir,['pull','--ff-only','origin',p.branch],env));
-    const after=await rev(dir,'HEAD'); await snapshot(user.id,p.id,'after-pull');
-    await updateProject(p.id,{syncState:'synced',syncMessage:'Remote changes pulled automatically.',lastSyncAt:new Date().toISOString(),lastPulledCommit:after}); broadcast(user.id,{type:'project-updated',projectId:p.id,reason:'github-pull'});
-  } catch(e){ await updateProject(p.id,{syncState:'error',syncMessage:e.stderr||e.message,lastCheckedAt:new Date().toISOString()}); broadcast(user.id,{type:'sync-error',projectId:p.id}); }
+    const project = await dbGetProject(req.params.id);
+    if (!project || project.userId !== a.user.id) return res.status(404).json({ error: 'Project not found.' });
+    await withProjectLock(project.id, async () => {
+      const snapshots = await queryOne('snapshots', supabase.from('snapshots').select('storage_path').eq('project_id', project.id));
+      const objects = [project.storagePath, ...(snapshots || []).map(x => x.storage_path)].filter(Boolean);
+      await storageRemove(objects);
+      if (snapshots?.length) await queryOne('snapshots', supabase.from('snapshots').delete().eq('project_id', project.id));
+      await dbDeleteProject(project.id, a.user.id);
+    });
+    broadcast(a.user.id, { type: 'projects-changed' });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+app.get('/api/projects/:id/history', async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  try {
+    const project = await dbGetProject(req.params.id);
+    if (!project || project.userId !== a.user.id) return res.status(404).json({ error: 'Project not found.' });
+    res.json(await listSnapshots(project.id, a.user.id));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+app.get('/api/github/repos', async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  try {
+    const token = await userToken(a.user);
+    const repos = [];
+    for (let page = 1; page <= 10; page++) {
+      const data = await githubFetch(`https://api.github.com/user/repos?per_page=100&sort=updated&page=${page}`, { headers: githubHeaders(token) });
+      repos.push(...data);
+      if (data.length < 100) break;
+    }
+    res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
+  } catch (e) { res.status(502).json({ error: e.message }); }
+});
+app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  const { projectId, repoId, repoName, visibility = 'private', branch = 'main' } = req.body || {};
+  if (!projectId) return res.status(400).json({ error: 'Select a project.' });
+  try {
+    const project = await dbGetProject(projectId);
+    if (!project || project.userId !== a.user.id) return res.status(404).json({ error: 'Project not found.' });
+    const token = await userToken(a.user);
+    await withProjectLock(project.id, async () => {
+      let repo;
+      if (repoId) repo = await githubFetch(`https://api.github.com/repositories/${repoId}`, { headers: githubHeaders(token) });
+      else repo = await githubFetch('https://api.github.com/user/repos', { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ name: normalizeName(repoName || project.name), private: visibility !== 'public', auto_init: false }) });
+      let updatedProject = { ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch };
+      await withWorkspace(project, async dir => {
+        await snapshotProject(updatedProject, dir, 'before-push');
+        await ensureGit(dir, repo.clone_url);
+        const dirty = await statusPorcelain(dir);
+        await withGitAuth(token, async env => {
+          await runGit(dir, ['fetch', 'origin'], env).catch(() => {});
+          const remoteBranch = repo.default_branch || branch;
+          if (!dirty) {
+            const remoteRef = await rev(dir, `origin/${remoteBranch}`);
+            const head = await rev(dir, 'HEAD');
+            if (remoteRef && !head) throw new Error('Selected repository already has history. Use a fresh repository or pull/merge it first.');
+          }
+          await runGit(dir, ['add', '-A'], env);
+          let changes = true;
+          try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
+          if (changes) await runGit(dir, ['commit', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
+          await runGit(dir, ['branch', '-M', branch], env);
+          await runGit(dir, ['push', '-u', 'origin', branch], env);
+        });
+        const commit = await rev(dir, 'HEAD');
+        await snapshotProject(updatedProject, dir, 'after-push');
+        const persisted = await persistWorkingTree(updatedProject, dir);
+        updatedProject = { ...updatedProject, storagePath: persisted.storagePath, fileCount: await countFiles(dir), lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage: 'Push completed.' };
+      });
+      await dbUpsertProject(updatedProject);
+      project.lastPushedAt = updatedProject.lastPushedAt;
+      Object.assign(project, updatedProject);
+    });
+    broadcast(a.user.id, { type: 'project-updated', projectId: project.id, reason: 'push' });
+    res.json({ ok: true, repo: { full_name: project.repoFullName, html_url: project.repoUrl }, project: { ...project, files: project.fileCount } });
+  } catch (e) {
+    await updateProject(projectId, a.user.id, { syncState: 'error', syncMessage: e.stderr || e.message }).catch(() => {});
+    res.status(500).json({ error: e.stderr || e.message || 'Push failed.' });
+  }
+});
+
+async function syncProjectForUser(user, project) {
+  if (!project.repoFullName || !project.branch) return;
+  await withProjectLock(project.id, async () => {
+    const token = await userToken(user);
+    if (!token) return;
+    await withWorkspace(project, async dir => {
+      try {
+        await ensureGit(dir, project.remoteUrl);
+        const dirty = await statusPorcelain(dir);
+        const before = await rev(dir, 'HEAD');
+        await withGitAuth(token, env => runGit(dir, ['fetch', 'origin', project.branch], env));
+        const remote = await rev(dir, `origin/${project.branch}`);
+        if (!remote || remote === before) return;
+        if (dirty) {
+          await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: 'Remote changes detected but local edits were left untouched.', lastCheckedAt: nowIso() });
+          broadcast(user.id, { type: 'sync-conflict', projectId: project.id });
+          return;
+        }
+        await snapshotProject(project, dir, 'before-pull');
+        await withGitAuth(token, env => runGit(dir, ['pull', '--ff-only', 'origin', project.branch], env));
+        const after = await rev(dir, 'HEAD');
+        await snapshotProject(project, dir, 'after-pull');
+        const persisted = await persistWorkingTree(project, dir);
+        await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: await countFiles(dir), syncState: 'synced', syncMessage: 'Remote changes pulled automatically.', lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso() });
+        broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
+      } catch (e) {
+        await updateProject(project.id, user.id, { syncState: 'error', syncMessage: e.stderr || e.message, lastCheckedAt: nowIso() }).catch(() => {});
+        broadcast(user.id, { type: 'sync-error', projectId: project.id });
+      }
+    });
+  });
 }
 let syncRunning = false;
-async function syncAll(){
-  if (syncRunning) return;
+async function syncAll() {
+  if (syncRunning || !supabase) return;
   syncRunning = true;
   try {
-    const db=await readDB();
-    for(const user of Object.values(db.users)){
-      if(!user.githubTokenEnc) continue;
-      for(const p of Object.values(db.projects).filter(x=>x.userId===user.id&&x.repoFullName)){
-        await syncProjectForUser(db,user,p);
-      }
+    const users = await dbListUsers();
+    for (const user of users) {
+      if (!user.githubTokenEnc) continue;
+      const projects = await dbListProjects(user.id);
+      for (const project of projects) if (project.repoFullName) await syncProjectForUser(user, project);
     }
-  } finally {
-    syncRunning = false;
-  }
+  } catch {}
+  finally { syncRunning = false; }
 }
-setInterval(()=>syncAll().catch(()=>{}),SYNC_MS);
+
+app.get('/api/health', async (_req, res) => {
+  let persistence = hasSupabase ? 'supabase-postgres-and-storage' : 'local-ephemeral';
+  let datastore = 'not-configured';
+  if (supabase) {
+    const { error } = await supabase.from('users').select('id').limit(1);
+    datastore = error ? 'error' : 'ready';
+    if (error && isProd) return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, error: 'Persistent datastore is unavailable.' });
+  }
+  res.json({ ok: true, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS });
+});
 
 app.use((err, _req, res, next) => {
   if (err instanceof multer.MulterError) return res.status(413).json({ error: `Upload rejected: ${err.message}` });
   if (err) return res.status(500).json({ error: 'Unexpected server error.' });
   next();
 });
-async function cleanupUploads(){ const now=Date.now(); for(const name of await fs.readdir(uploadTemp).catch(()=>[])){ const p=path.join(uploadTemp,name); const stat=await fs.stat(p).catch(()=>null); if(stat && now-stat.mtimeMs>60*60*1000) await fs.rm(p,{force:true}).catch(()=>{}); } }
+
+async function cleanupUploads() {
+  const now = Date.now();
+  for (const name of await fs.readdir(UPLOAD_TEMP).catch(() => [])) {
+    const p = path.join(UPLOAD_TEMP, name);
+    const stat = await fs.stat(p).catch(() => null);
+    if (stat && now - stat.mtimeMs > 60 * 60 * 1000) await fs.rm(p, { force: true }).catch(() => {});
+  }
+}
 await cleanupUploads();
-app.get('/api/health',(_req,res)=>res.json({ok:true,app:APP_NAME,syncIntervalMs:SYNC_MS,persistence:'file-backed',maxUploadMb:Math.round(MAX_TOTAL_UPLOAD/1024/1024),maxSnapshots:MAX_SNAPSHOTS}));
-app.get('/{*splat}',(_req,res)=>res.sendFile(path.join(ROOT,'public','index.html')));
-app.listen(PORT,HOST,()=>console.log(`${APP_NAME} running on http://${HOST}:${PORT}`));
+if (supabase) {
+  setInterval(() => { cleanupAuthRecords(); }, 15 * 60 * 1000).unref();
+  setInterval(() => { syncAll(); }, SYNC_MS).unref();
+}
+
+// Backend-hosted UI remains available. GitHub Pages publishes public/ separately.
+app.get('/{*splat}', (_req, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));
+app.listen(PORT, HOST, () => console.log(`${APP_NAME} running on http://${HOST}:${PORT}`));

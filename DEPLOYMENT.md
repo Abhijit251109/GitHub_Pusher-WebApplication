@@ -1,60 +1,79 @@
-# Public deployment checklist
+# Deployment checklist
 
-## 1. GitHub OAuth App
+This version is designed for **GitHub Pages + Render Free + Supabase Free**. GitHub Pages serves the static frontend, Render runs the Node/Express backend, and Supabase stores the durable database and private project/snapshot archives.
 
-Register an OAuth App in GitHub Developer Settings.
+## 1. Supabase
 
-Set:
+Run `supabase/schema.sql` once in the Supabase SQL Editor. Copy the project URL and the server-only service-role key into the Render environment. Never put the service-role key in `public/` or a GitHub Pages build.
 
-- Homepage URL: `https://YOUR-DOMAIN/`
-- Authorization callback URL: `https://YOUR-DOMAIN/auth/github/callback`
-- A scope that permits the repository operations you need (`repo` for private repositories in this OAuth implementation).
+## 2. Render Free
 
-GitHub's current documentation recommends considering a GitHub App for integrations that benefit from fine-grained permissions and short-lived tokens. This project uses an OAuth App because it provides the direct user-authorization flow required by this personal project manager.
+Use the included `render.yaml`, or manually create a **Free Web Service** with:
 
-## 2. Environment variables
+```text
+Build:  npm install --no-audit --no-fund
+Start:  npm start
+Health: /api/health
+```
 
-Copy `.env.example` to `.env` and set:
+Set the variables in `.env.example`, including:
 
 ```env
-NODE_ENV=production
-PUBLIC_BASE_URL=https://YOUR-DOMAIN
-GITHUB_CALLBACK_URL=https://YOUR-DOMAIN/auth/github/callback
-GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
-SESSION_SECRET=at-least-32-random-characters
-TOKEN_ENCRYPTION_KEY=64-hex-characters
-COOKIE_SECURE=true
-TRUST_PROXY=1
+PUBLIC_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com
+FRONTEND_URL=https://USERNAME.github.io/REPOSITORY
+SUPABASE_URL=https://YOUR-PROJECT.supabase.co
+SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
-## 3. Persistent storage
+Render Free's filesystem is ephemeral, so do not store application data under `/app/data`. The server only uses temporary local space for upload and Git operations; durable state is in Supabase.
 
-Mount `/app/data` to durable storage. Do not mount the application source directory as writable shared storage. Projects, snapshots, user records, sessions, and encrypted GitHub tokens live there.
+## 3. GitHub OAuth
 
-Do not run multiple server replicas against the same file-backed data directory. For a multi-replica service, move the registry/session store to a shared database and project data to shared object/block storage.
+In the GitHub OAuth App, use:
 
-## 4. HTTPS
+- Homepage URL: your GitHub Pages URL
+- Authorization callback URL: `https://YOUR-RENDER-SERVICE.onrender.com/auth/github/callback`
 
-Place the Node server behind an HTTPS reverse proxy or managed platform TLS. The production session cookie is marked `Secure`.
+The backend uses `state` and PKCE S256 for the OAuth web flow.
 
-## 5. Docker
+## 4. Personal-account allowlist
 
-```bash
-docker compose up -d --build
+For a personal deployment, keep:
+
+```env
+REQUIRE_GITHUB_ALLOWLIST=true
+ALLOWED_GITHUB_USER_IDS=YOUR_NUMERIC_GITHUB_ID
 ```
 
-## 6. Automatic sync
+The numeric GitHub user ID is used instead of the mutable username.
 
-The server checks linked repositories every `SYNC_INTERVAL_MS` milliseconds (20 seconds by default). When a remote commit is found and the local project is clean, it performs a fast-forward-only pull and creates before/after snapshots.
+## 5. GitHub Pages
 
-If local uncommitted changes exist, the server does not overwrite them; the project is marked `conflict` instead.
+The included `.github/workflows/pages.yml` publishes `public/` using GitHub Actions. In **Repository Settings → Pages**, select **GitHub Actions** as the source.
+
+The static frontend uses relative asset URLs and therefore continues to work on repository-path Pages URLs. `public/config.js` can optionally contain the Render API URL; otherwise the login page asks for it once and stores it locally.
+
+## 6. Durable data
+
+The following remain intact across Render restart, free-tier spin-down, and redeploy:
+
+- Postgres users and encrypted GitHub credentials
+- application sessions and OAuth state
+- project metadata
+- project working trees, including `.git` history
+- before/after snapshots
+
+Supabase Free currently includes 500 MB of database capacity and 1 GB of file storage. Keep the archive/snapshot limits conservative and export important data independently because Free does not include automatic database backups.
 
 ## 7. Native apps
 
-The public website is the canonical backend. Desktop Electron and Android Capacitor wrappers should point to that HTTPS URL. Do not put the GitHub client secret in the native client.
+Electron and Capacitor clients should point at the HTTPS backend URL. Never ship the GitHub OAuth client secret in a desktop/mobile client.
 
+## GitHub Pages
 
-### Native application downloads
+`public/config.js` contains the Supabase publishable key used by the browser-facing configuration. That key is intentionally public. Do not place the Supabase service-role key in `public/` or any GitHub Pages artifact.
 
-The public server exposes installer packages placed in `application/windows/` and `application/android/` through the download API. Only `.msi`/`.exe` (Windows) and `.apk`/`.aab` (Android) are exposed.
+Supabase project URL configured for this build:
+`https://vsrooptemnxxqolzbeze.supabase.co`
+
+The Supabase publishable key is safe for the browser bundle; the Supabase secret key remains backend-only in `.env`/Render environment variables.

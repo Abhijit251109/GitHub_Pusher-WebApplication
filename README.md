@@ -1,54 +1,71 @@
-# GitHub Project Pusher 2.1.1
+# GitHub Project Pusher 3.0.0
 
-A public-hostable GitHub project library with web, PWA, desktop, and Android targets.
+A public-hostable GitHub project library with a static GitHub Pages frontend, a free Render Node backend, and persistent Supabase Postgres + private Storage.
 
 ## Main features
 
-- GitHub OAuth authentication
-- Persistent per-user project library
-- Add/remove projects
-- Push to an existing repo or create a new repo
+- GitHub OAuth authentication with OAuth state + PKCE S256
+- Optional numeric-GitHub-ID allowlist for personal deployments
+- Encrypted GitHub tokens stored only on the server
+- Persistent project metadata in Postgres
+- Persistent project files and `.git` history in private object storage
+- Before/after snapshots retained in private object storage
+- Push to an existing repository or create a new repository
 - Automatic Git initialization when `.git` is missing
 - Background GitHub sync and fast-forward pulls
 - Dirty-tree conflict protection
-- Before/after snapshots
 - Installable PWA
-- Electron desktop shell for Windows/macOS/Linux
-- Capacitor Android shell source
+- GitHub Pages-compatible static frontend
+- Electron desktop shell and Capacitor Android source
 
-## Repository layout
+## Architecture
 
-- `public/` web application
-- `server.js` backend and sync service
-- `docs/` architecture, deployment, and user documentation
-- `electron/` desktop runtime
-- `native/desktop/` desktop target documentation
-- `native/android/` checked-in Android scaffold/reference; Capacitor generates the canonical root `android/` project
+```text
+GitHub Pages (public/)
+        |
+        | HTTPS API + short-lived login code
+        v
+Render Free Web Service (Node/Express)
+        |
+        +---- Supabase Postgres (users, sessions, projects, snapshots)
+        |
+        +---- Supabase Storage (project archives + snapshots)
+        |
+        +---- GitHub OAuth + GitHub API
+```
 
-## Run
+The Render filesystem is temporary. Important application data is never treated as durable local state.
+
+## Run locally
 
 ```bash
 npm install
 npm start
 ```
 
-Open `http://localhost:4173` for local development.
+Open `http://127.0.0.1:4173`.
 
-## Public deployment
+Local development uses the same Supabase-backed persistence model. Create a Supabase project, run `supabase/schema.sql`, copy `.env.example` to `.env`, and provide the values before starting the server.
 
-Use `.env.example`, `docker-compose.yml`, and `docs/DEPLOYMENT.md`. A persistent volume must be mounted at `/app/data`.
+## Free deployment
 
-## Native applications
+See [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) for the complete GitHub Pages + Render Free + Supabase setup.
 
-See `native/README.md` for Windows/macOS/Linux and Android build instructions.
+### Why not a Render disk?
 
-## Application downloads
+Render's current Free web services have an ephemeral filesystem and do not support persistent disks. The app therefore stores data in Supabase instead. Render Free remains useful for running the API, while Supabase holds durable state.
 
-Place release builds under `application/windows/` and `application/android/`. The website automatically discovers supported files and shows download buttons. Windows supports `.msi` and `.exe`; Android supports `.apk` and `.aab`.
+### GitHub Pages
 
-The configured Windows MSI artifact is named `github_pusher.msi`. Build it with `npm run build:windows-installer -- --x64` on a Windows build host. A GitHub Actions workflow is included at `.github/workflows/build-windows-msi.yml` so the MSI can be built reproducibly on GitHub.
+The static frontend keeps the Supabase **publishable** key in `public/config.js`. This key is intentionally browser-visible; it must never be replaced with `SUPABASE_SERVICE_ROLE_KEY`. The current frontend continues to send privileged data operations through the Render API.
 
-The MSI build requires the Electron/electron-builder dependencies and a Windows-compatible build environment; the checked-in workflow is the reliable cross-platform way to produce the Windows installer from this source tree.
 
-## Direct login
-When the server is running, open `/login` to go straight to GitHub authorization. The included `public/login.html` is also suitable as a small login launcher.
+The repository contains `.github/workflows/pages.yml`, which publishes the `public/` folder as a static GitHub Pages site. Server-side Node code is not sent to or executed by GitHub Pages. `public/` uses relative asset URLs so repository-path Pages sites continue to work.
+
+## Database setup
+
+Run `supabase/schema.sql` in the Supabase SQL Editor. It creates the server-owned tables, enables row-level security, and creates the private `gpp-private` Storage bucket.
+
+## Security
+
+See [`SECURITY.md`](SECURITY.md). In particular, never put `GITHUB_CLIENT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`, `SESSION_SECRET`, or `TOKEN_ENCRYPTION_KEY` in `public/` or a GitHub Pages build.

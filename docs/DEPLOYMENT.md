@@ -1,58 +1,113 @@
-# Production Deployment
+# Free deployment: GitHub Pages + Render + Supabase
 
-## 1. GitHub OAuth
+This project intentionally does **not** use the Render filesystem for persistent application data. Render's free web services have ephemeral filesystems: anything written there is lost on restart, spin-down, or redeploy. Instead, the app keeps metadata in Supabase Postgres and project/snapshot archives in a private Supabase Storage bucket. Render runs only the Node/Express API. GitHub Pages serves the static `public/` frontend.
 
-Create a GitHub OAuth App and set:
+Render currently offers free Node web services, but their filesystem is ephemeral. Supabase's Free plan currently includes 500 MB of database capacity and 1 GB of file storage; free projects may pause after inactivity. Treat the service as a hobby/personal deployment and keep an export/backup of important projects. See the linked official docs in the root README for the current quotas and limitations.
 
-- Homepage URL: `https://YOUR-DOMAIN`
-- Authorization callback URL: `https://YOUR-DOMAIN/auth/github/callback`
+## 1. Create Supabase storage
 
-Configure the required repository permission scope for the repositories you want the service to manage.
+1. Create a Supabase project on the Free plan.
+2. Open **SQL Editor**.
+3. Paste and run `supabase/schema.sql`.
+4. In **Project Settings → API**, copy the project URL and the server-only **service role** key.
+5. Keep the service-role key secret. Never put it in `public/`, GitHub Pages, or a client bundle.
+6. The SQL creates a private bucket named `gpp-private` with a 50 MB object limit. The app keeps individual project archives below its own 45 MB limit so it remains compatible with the Free plan's upload ceiling.
 
-## 2. Environment
+## 2. Create the Render service
 
-Copy `.env.example` to `.env` and set:
+1. Push this repository to GitHub.
+2. In Render, choose **New → Web Service** and connect the repository.
+3. Render can use `render.yaml`, or you can enter the equivalent settings manually.
+4. Choose the **Free** plan.
+5. Set the secrets/environment values from `.env.example` and `render.yaml`.
+6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-project-pusher.onrender.com`.
+7. Set `GITHUB_CALLBACK_URL` to `https://github-project-pusher.onrender.com/auth/github/callback`.
+8. Set `FRONTEND_URL` to your GitHub Pages URL, such as `https://USERNAME.github.io/REPOSITORY`.
+
+### Required secrets
+
+Generate these locally, then paste them into Render's environment settings:
+
+```bash
+node -e "const c=require('crypto'); console.log(c.randomBytes(32).toString('hex'))"
+node -e "const c=require('crypto'); console.log(c.randomBytes(32).toString('base64url'))"
+```
+
+Use the first output for `TOKEN_ENCRYPTION_KEY` and the second for `SESSION_SECRET` (or use another 32+ character random secret). Never commit either value.
+
+## 3. Configure GitHub OAuth
+
+Create or edit your GitHub OAuth App and set:
+
+- **Homepage URL:** your GitHub Pages URL
+- **Authorization callback URL:** your Render callback URL
+
+GitHub's current OAuth documentation recommends the `state` parameter and PKCE (`S256`) for the web application flow. The backend implements both, and it exchanges the OAuth code server-side so the GitHub client secret never reaches the GitHub Pages frontend.
+
+## 4. Lock the app to your own GitHub account
+
+For a personal deployment, leave these settings enabled:
 
 ```env
-PORT=4173
-PUBLIC_BASE_URL=https://YOUR-DOMAIN
-GITHUB_CLIENT_ID=...
-GITHUB_CLIENT_SECRET=...
-GITHUB_CALLBACK_URL=https://YOUR-DOMAIN/auth/github/callback
-SESSION_SECRET=replace-with-a-long-random-secret
-TOKEN_ENCRYPTION_KEY=64-hex-characters
-COOKIE_SECURE=true
+REQUIRE_GITHUB_ALLOWLIST=true
+ALLOWED_GITHUB_USER_IDS=YOUR_NUMERIC_GITHUB_USER_ID
 ```
 
-Generate `TOKEN_ENCRYPTION_KEY` with:
+Use the numeric GitHub user ID, not the username. The server denies every other GitHub account before issuing an application session.
 
-```bash
-openssl rand -hex 32
+## 5. GitHub Pages deployment
+
+The included `.github/workflows/pages.yml` publishes `public/` as a static Pages site. This does **not** run `server.js`, and it does not require Node on the Pages host.
+
+In GitHub:
+
+1. Open **Settings → Pages**.
+2. Set **Source** to **GitHub Actions**.
+3. Push to `master` or `main`.
+4. The workflow publishes the frontend.
+
+The frontend is built with relative asset URLs, so the app continues to work whether the Pages site is served at the repository root (`USERNAME.github.io`) or under a repository path (`USERNAME.github.io/REPOSITORY`).
+
+The first time a GitHub Pages user opens the site, the login page asks for the Render API URL unless `public/config.js` has already been set to it. You can set:
+
+```js
+window.GPP_CONFIG = { API_BASE: 'https://YOUR-RENDER-SERVICE.onrender.com' };
 ```
 
-## 3. Persistent storage
+The frontend never receives the GitHub OAuth client secret or the Supabase service-role key. The distributable ZIP also excludes `.env`; configure backend secrets in Render instead.
 
-Mount a persistent volume at `/app/data`. Losing this directory loses the server-side project library, snapshots, sessions, and stored encrypted credentials.
+## 6. What is persistent now?
 
-## 4. HTTPS
+- User records and encrypted GitHub tokens: Supabase Postgres.
+- Sessions, OAuth state, one-time login codes, and SSE tickets: Supabase Postgres.
+- Project metadata: Supabase Postgres.
+- Uploaded project working trees, including `.git` history: private Supabase Storage archive per project.
+- Before/after snapshots: private Supabase Storage archives plus snapshot metadata in Postgres.
+- Server temporary files: `/tmp`; these are disposable and are recreated as needed.
 
-Put the Node.js service behind an HTTPS reverse proxy or a platform-managed TLS endpoint. Do not expose an OAuth callback or session cookie over plain HTTP in production.
+A Render restart, spin-down, or redeploy therefore does not delete the project's cloud copy. The free Render service may still sleep when idle, and Supabase Free projects may pause after inactivity, but the stored data remains in the remote datastore rather than the Render filesystem.
 
-## 5. Docker
+## 7. Free-tier storage guardrails
 
-```bash
-docker compose up -d --build
-```
+The application defaults to:
 
-## 6. Public installation
+- `MAX_TOTAL_UPLOAD_MB=40`
+- `MAX_ARCHIVE_MB=45`
+- `MAX_SNAPSHOTS_PER_PROJECT=10`
 
-The hosted site is a PWA. On supported Android and desktop browsers, use the site's **Install App** button. This installs the web app without publishing through an app store.
+These conservative values keep ordinary archives under Supabase Free's per-file upload ceiling and help control storage usage. Supabase Free currently includes 1 GB of file storage and 500 MB of database size, so this is best suited to personal projects rather than a large multi-user platform.
 
-## 7. Native builds
+## 8. Security model
 
-Native applications are shells around the hosted service. Build the desktop package on the target OS or in CI, and build the Android APK/AAB with Android Studio or Gradle.
+- OAuth `state` and PKCE S256 protect the sign-in flow.
+- GitHub tokens are encrypted with AES-256-GCM before they enter the database.
+- The browser gets only an application session token; it never receives the GitHub token or service-role key.
+- Session tokens are stored only as HMAC hashes in the database and expire automatically.
+- Cross-origin GitHub Pages access uses a short-lived login code and a short-lived SSE ticket.
+- CORS is restricted to the configured frontend and backend origins.
+- Same-site browser requests still require the expected origin when cookie authentication is used.
+- A personal GitHub allowlist can block all other GitHub accounts.
+- Projects and snapshots are authorized by the authenticated numeric GitHub user ID.
+- Storage is private; no project archive is made public.
 
-
-### Native application downloads
-
-The public server exposes installer packages placed in `application/windows/` and `application/android/` through the download API. Only `.msi`/`.exe` (Windows) and `.apk`/`.aab` (Android) are exposed.
+For stronger recovery guarantees than the Free plans provide, periodically export important data. Supabase Free does not include automatic backups for the database.
