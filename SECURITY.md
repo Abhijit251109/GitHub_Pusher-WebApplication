@@ -7,7 +7,7 @@ This application handles GitHub OAuth credentials and user project archives. The
 Never commit:
 
 - `GITHUB_CLIENT_SECRET`
-- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_SECRET_KEY`
 - `SESSION_SECRET`
 - `TOKEN_ENCRYPTION_KEY`
 
@@ -23,7 +23,7 @@ Access and refresh tokens are encrypted with AES-256-GCM before database storage
 
 ## Storage
 
-Project working trees and snapshots are stored in a private Supabase Storage bucket. The server uses the service-role key to access them. The browser receives no Storage secret.
+Project working trees and snapshots are stored in a private Supabase Storage bucket. The server uses the Supabase secret key to access them. The browser receives no Storage secret.
 
 ## Authorization
 

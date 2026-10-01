@@ -36,6 +36,10 @@ Render Free Web Service (Node/Express)
 
 The Render filesystem is temporary. Important application data is never treated as durable local state.
 
+## Runtime
+
+The project pins Node.js 22.22.0 for the backend and container builds.
+
 ## Run locally
 
 ```bash

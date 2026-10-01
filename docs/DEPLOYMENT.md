@@ -20,9 +20,9 @@ Render currently offers free Node web services, but their filesystem is ephemera
 3. Render can use `render.yaml`, or you can enter the equivalent settings manually.
 4. Choose the **Free** plan.
 5. Set the secrets/environment values from `.env.example` and `render.yaml`.
-6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-project-pusher.onrender.com`.
-7. Set `GITHUB_CALLBACK_URL` to `https://github-project-pusher.onrender.com/auth/github/callback`.
-8. Set `FRONTEND_URL` to your GitHub Pages URL, such as `https://USERNAME.github.io/REPOSITORY`.
+6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-pusher-g3ac.onrender.com`.
+7. Set `GITHUB_CALLBACK_URL` to `https://github-pusher-g3ac.onrender.com/auth/github/callback`.
+8. Set `FRONTEND_URL` to `https://abhijit251109.github.io/GitHub_Pusher-WebApplication/`.
 
 ### Required secrets
 
@@ -35,18 +35,30 @@ node -e "const c=require('crypto'); console.log(c.randomBytes(32).toString('base
 
 Use the first output for `TOKEN_ENCRYPTION_KEY` and the second for `SESSION_SECRET` (or use another 32+ character random secret). Never commit either value.
 
+### Exact production URLs for this build
+
+Use these exact values for this deployment:
+
+```text
+FRONTEND_URL=https://abhijit251109.github.io/GitHub_Pusher-WebApplication/
+PUBLIC_BASE_URL=https://github-pusher-g3ac.onrender.com
+GITHUB_CALLBACK_URL=https://github-pusher-g3ac.onrender.com/auth/github/callback
+```
+
+The GitHub OAuth App must use the same callback URL.
+
 ## 3. Configure GitHub OAuth
 
 Create or edit your GitHub OAuth App and set:
 
 - **Homepage URL:** your GitHub Pages URL
-- **Authorization callback URL:** your Render callback URL
+- **Redirect URI:** your Render callback URL
 
 GitHub's current OAuth documentation recommends the `state` parameter and PKCE (`S256`) for the web application flow. The backend implements both, and it exchanges the OAuth code server-side so the GitHub client secret never reaches the GitHub Pages frontend.
 
 ## 4. Lock the app to your own GitHub account
 
-For a personal deployment, leave these settings enabled:
+For a private/personal-only deployment, enable the allowlist explicitly:
 
 ```env
 REQUIRE_GITHUB_ALLOWLIST=true

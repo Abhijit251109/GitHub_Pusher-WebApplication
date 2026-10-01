@@ -7,7 +7,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import * as tar from 'tar';
+import tar from 'tar';
 import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
@@ -46,7 +46,9 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
+const GITHUB_ALLOWLIST_MISCONFIGURED = REQUIRE_GITHUB_ALLOWLIST && ALLOWED_GITHUB_USER_IDS.size === 0;
 const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
+const GITHUB_CALLBACK_URL = String(process.env.GITHUB_CALLBACK_URL || '').trim().replace(/\/$/, '');
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
@@ -155,6 +157,12 @@ function decrypt(value) {
 function publicBaseUrl(req) {
   return String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 }
+function githubCallbackUrl(req) {
+  const value = GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+  const parsed = new URL(value);
+  if (!/^https?:$/.test(parsed.protocol) || parsed.search || parsed.hash) throw new Error('Invalid GITHUB_CALLBACK_URL. Use an absolute HTTP(S) URL without query parameters.');
+  return parsed.toString().replace(/\/$/, '');
+}
 function allowedOrigin(origin) {
   try {
     const normalized = new URL(origin).origin;
@@ -179,7 +187,8 @@ function parseCookies(req) {
   for (const pair of String(req.headers.cookie || '').split(';')) {
     const i = pair.indexOf('=');
     if (i < 0) continue;
-    out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim());
+    const raw = pair.slice(i + 1).trim();
+    try { out[pair.slice(0, i).trim()] = decodeURIComponent(raw); } catch { out[pair.slice(0, i).trim()] = raw; }
   }
   return out;
 }
@@ -642,7 +651,8 @@ app.get('/api/auth/me', async (req, res) => {
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
 app.get('/api/auth/login', async (req, res) => {
   try {
-    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
+    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in Render.');
+    if (GITHUB_ALLOWLIST_MISCONFIGURED) return res.status(503).send('GitHub allowlist is enabled but ALLOWED_GITHUB_USER_IDS is empty.');
     supabaseRequired();
     const returnTo = allowedReturnTo(req.query.return_to, req);
     if (req.query.return_to && !returnTo) return res.status(400).send('Invalid return URL.');
@@ -652,7 +662,7 @@ app.get('/api/auth/login', async (req, res) => {
     const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     await createOAuthAttempt(state, codeVerifier, returnTo, browserBinding);
     res.setHeader('Set-Cookie', `${OAUTH_BINDING_COOKIE}=${browserBinding}; ${oauthBindingCookieOptions()}`);
-    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+    const redirectUri = githubCallbackUrl(req);
     const u = new URL('https://github.com/login/oauth/authorize');
     u.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
     u.searchParams.set('redirect_uri', redirectUri);
@@ -667,6 +677,7 @@ app.get('/api/auth/login', async (req, res) => {
 app.get('/auth/github/callback', async (req, res) => {
   try {
     supabaseRequired();
+    if (req.query.error) return res.status(400).send(`GitHub authorization was not completed: ${String(req.query.error_description || req.query.error)}`);
     if (!req.query.code || !req.query.state) return res.status(400).send('Missing OAuth code/state.');
     const browserBinding = parseCookies(req)[OAUTH_BINDING_COOKIE];
     const attempt = await consumeOAuthAttempt(String(req.query.state), browserBinding);
@@ -674,7 +685,7 @@ app.get('/auth/github/callback', async (req, res) => {
       res.setHeader('Set-Cookie', clearOAuthBindingCookie());
       return res.status(400).send('Invalid, expired, or browser-mismatched OAuth state.');
     }
-    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+    const redirectUri = githubCallbackUrl(req);
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.query.code, state: req.query.state, redirect_uri: redirectUri, code_verifier: attempt.code_verifier })
@@ -932,15 +943,28 @@ async function syncAll() {
   finally { syncRunning = false; }
 }
 
-app.get('/api/health', async (_req, res) => {
+app.get('/api/health', async (req, res) => {
   let persistence = hasSupabase ? 'supabase-postgres-and-storage' : 'local-ephemeral';
   let datastore = 'not-configured';
+  let callbackUrl = null;
+  let callbackError = null;
+  try { callbackUrl = githubCallbackUrl(req); } catch (e) { callbackError = e.message; }
+  const diagnostics = {
+    oauthConfigured: Boolean(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET),
+    githubCallbackConfigured: Boolean(callbackUrl),
+    githubCallbackError: callbackError,
+    frontendOrigin: FRONTEND_ORIGIN || null,
+    publicOrigin: (() => { try { return new URL(publicBaseUrl(req)).origin; } catch { return null; } })(),
+    allowlistEnabled: REQUIRE_GITHUB_ALLOWLIST,
+    allowlistConfigured: !GITHUB_ALLOWLIST_MISCONFIGURED
+  };
   if (supabase) {
     const { error } = await supabase.from('users').select('id').limit(1);
     datastore = error ? 'error' : 'ready';
-    if (error && isProd) return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, error: 'Persistent datastore is unavailable.' });
+    if (error) return res.status(200).json({ ok: false, app: APP_NAME, persistence, datastore, storageBucket: STORAGE_BUCKET, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS, diagnostics });
   }
-  res.json({ ok: true, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS });
+  const healthy = diagnostics.oauthConfigured && diagnostics.githubCallbackConfigured && diagnostics.allowlistConfigured;
+  res.status(200).json({ ok: healthy, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS, diagnostics });
 });
 
 app.use((err, _req, res, next) => {
