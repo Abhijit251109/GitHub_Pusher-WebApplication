@@ -7,7 +7,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import * as tar from 'tar';
+import tar from 'tar';
 import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
@@ -46,9 +46,7 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
-const GITHUB_ALLOWLIST_MISCONFIGURED = REQUIRE_GITHUB_ALLOWLIST && ALLOWED_GITHUB_USER_IDS.size === 0;
 const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
-const GITHUB_CALLBACK_URL = String(process.env.GITHUB_CALLBACK_URL || '').trim().replace(/\/$/, '');
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
@@ -157,12 +155,6 @@ function decrypt(value) {
 function publicBaseUrl(req) {
   return String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 }
-function githubCallbackUrl(req) {
-  const value = GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
-  const parsed = new URL(value);
-  if (!/^https?:$/.test(parsed.protocol) || parsed.search || parsed.hash) throw new Error('Invalid GITHUB_CALLBACK_URL. Use an absolute HTTP(S) URL without query parameters.');
-  return parsed.toString().replace(/\/$/, '');
-}
 function allowedOrigin(origin) {
   try {
     const normalized = new URL(origin).origin;
@@ -187,8 +179,7 @@ function parseCookies(req) {
   for (const pair of String(req.headers.cookie || '').split(';')) {
     const i = pair.indexOf('=');
     if (i < 0) continue;
-    const raw = pair.slice(i + 1).trim();
-    try { out[pair.slice(0, i).trim()] = decodeURIComponent(raw); } catch { out[pair.slice(0, i).trim()] = raw; }
+    out[pair.slice(0, i).trim()] = decodeURIComponent(pair.slice(i + 1).trim());
   }
   return out;
 }
@@ -209,6 +200,13 @@ function getBearerToken(req) {
   return header.startsWith('Bearer ') ? header.slice(7).trim() : null;
 }
 function requestHasBearer(req) { return Boolean(getBearerToken(req)); }
+const EXTERNAL_FETCH_TIMEOUT_MS = Number(process.env.EXTERNAL_FETCH_TIMEOUT_MS || 30000);
+function fetchWithTimeout(url, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), EXTERNAL_FETCH_TIMEOUT_MS);
+  return fetch(url, { ...options, signal: options.signal || controller.signal })
+    .finally(() => clearTimeout(timeout));
+}
 
 async function queryOne(table, builder) {
   supabaseRequired();
@@ -465,6 +463,21 @@ async function persistWorkingTree(project, work) {
     await fs.rm(archive, { force: true }).catch(() => {});
   }
 }
+async function moveUploadedFile(source, target) {
+  await fs.mkdir(path.dirname(target), { recursive: true });
+  try {
+    await fs.rename(source, target);
+  } catch (error) {
+    // Render/containers can place multer's directory and the working tree on
+    // different filesystems. rename() then fails with EXDEV. Copy + remove is
+    // portable across filesystems and is safe here because the upload is
+    // bounded by multer's file-size limit.
+    if (error?.code !== 'EXDEV') throw error;
+    await fs.copyFile(source, target);
+    await fs.rm(source, { force: true });
+  }
+}
+
 async function countFiles(root) {
   let count = 0;
   async function walk(dir) {
@@ -521,7 +534,7 @@ function githubHeaders(token) {
   return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': APP_NAME };
 }
 async function githubFetch(url, options = {}) {
-  const r = await fetch(url, options);
+  const r = await fetchWithTimeout(url, options);
   const text = await r.text();
   let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!r.ok) throw new Error((data && data.message) || `GitHub API error ${r.status}`);
@@ -531,7 +544,7 @@ async function userToken(user) {
   if (!user.githubTokenEnc) return null;
   if (user.githubExpiresAt && user.githubExpiresAt - Date.now() < 60_000 && user.githubRefreshTokenEnc) {
     const refresh = decrypt(user.githubRefreshTokenEnc);
-    const response = await fetch('https://github.com/login/oauth/access_token', {
+    const response = await fetchWithTimeout('https://github.com/login/oauth/access_token', {
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, grant_type: 'refresh_token', refresh_token: refresh })
     });
@@ -651,8 +664,7 @@ app.get('/api/auth/me', async (req, res) => {
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
 app.get('/api/auth/login', async (req, res) => {
   try {
-    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server. Set GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET in Render.');
-    if (GITHUB_ALLOWLIST_MISCONFIGURED) return res.status(503).send('GitHub allowlist is enabled but ALLOWED_GITHUB_USER_IDS is empty.');
+    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
     supabaseRequired();
     const returnTo = allowedReturnTo(req.query.return_to, req);
     if (req.query.return_to && !returnTo) return res.status(400).send('Invalid return URL.');
@@ -662,7 +674,7 @@ app.get('/api/auth/login', async (req, res) => {
     const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
     await createOAuthAttempt(state, codeVerifier, returnTo, browserBinding);
     res.setHeader('Set-Cookie', `${OAUTH_BINDING_COOKIE}=${browserBinding}; ${oauthBindingCookieOptions()}`);
-    const redirectUri = githubCallbackUrl(req);
+    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
     const u = new URL('https://github.com/login/oauth/authorize');
     u.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
     u.searchParams.set('redirect_uri', redirectUri);
@@ -677,7 +689,6 @@ app.get('/api/auth/login', async (req, res) => {
 app.get('/auth/github/callback', async (req, res) => {
   try {
     supabaseRequired();
-    if (req.query.error) return res.status(400).send(`GitHub authorization was not completed: ${String(req.query.error_description || req.query.error)}`);
     if (!req.query.code || !req.query.state) return res.status(400).send('Missing OAuth code/state.');
     const browserBinding = parseCookies(req)[OAUTH_BINDING_COOKIE];
     const attempt = await consumeOAuthAttempt(String(req.query.state), browserBinding);
@@ -685,8 +696,8 @@ app.get('/auth/github/callback', async (req, res) => {
       res.setHeader('Set-Cookie', clearOAuthBindingCookie());
       return res.status(400).send('Invalid, expired, or browser-mismatched OAuth state.');
     }
-    const redirectUri = githubCallbackUrl(req);
-    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+    const tokenResponse = await fetchWithTimeout('https://github.com/login/oauth/access_token', {
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.query.code, state: req.query.state, redirect_uri: redirectUri, code_verifier: attempt.code_verifier })
     });
@@ -773,12 +784,15 @@ app.get('/api/projects', async (req, res) => {
     res.json(list.map(p => ({ ...p, files: p.fileCount })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
+app.post('/api/projects', ensureRequestProtection, async (req, res, next) => {
+  const a = await authUser(req, res);
+  if (!a) return;
+  req.auth = a;
   const len = Number(req.headers['content-length'] || 0);
   if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.` });
   next();
 }, upload.array('files', MAX_FILES), async (req, res) => {
-  const a = await authUser(req, res); if (!a) return;
+  const a = req.auth;
   let workspace = null;
   try {
     const files = req.files || [];
@@ -792,8 +806,7 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       if (!rel) continue;
       const target = path.join(workspace, rel);
       if (!target.startsWith(workspace + path.sep)) continue;
-      await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.rename(file.path, target);
+      await moveUploadedFile(file.path, target);
     }
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
@@ -943,28 +956,15 @@ async function syncAll() {
   finally { syncRunning = false; }
 }
 
-app.get('/api/health', async (req, res) => {
+app.get('/api/health', async (_req, res) => {
   let persistence = hasSupabase ? 'supabase-postgres-and-storage' : 'local-ephemeral';
   let datastore = 'not-configured';
-  let callbackUrl = null;
-  let callbackError = null;
-  try { callbackUrl = githubCallbackUrl(req); } catch (e) { callbackError = e.message; }
-  const diagnostics = {
-    oauthConfigured: Boolean(process.env.GITHUB_CLIENT_ID && process.env.GITHUB_CLIENT_SECRET),
-    githubCallbackConfigured: Boolean(callbackUrl),
-    githubCallbackError: callbackError,
-    frontendOrigin: FRONTEND_ORIGIN || null,
-    publicOrigin: (() => { try { return new URL(publicBaseUrl(req)).origin; } catch { return null; } })(),
-    allowlistEnabled: REQUIRE_GITHUB_ALLOWLIST,
-    allowlistConfigured: !GITHUB_ALLOWLIST_MISCONFIGURED
-  };
   if (supabase) {
     const { error } = await supabase.from('users').select('id').limit(1);
     datastore = error ? 'error' : 'ready';
-    if (error) return res.status(200).json({ ok: false, app: APP_NAME, persistence, datastore, storageBucket: STORAGE_BUCKET, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS, diagnostics });
+    if (error && isProd) return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, error: 'Persistent datastore is unavailable.' });
   }
-  const healthy = diagnostics.oauthConfigured && diagnostics.githubCallbackConfigured && diagnostics.allowlistConfigured;
-  res.status(200).json({ ok: healthy, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS, diagnostics });
+  res.json({ ok: true, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS });
 });
 
 app.use((err, _req, res, next) => {

@@ -1,23 +1,30 @@
-# Security and deployment audit — remediated build
+# Security and deployment audit — 3.0.1 corrective build
 
-This report corresponds to the current 3.0.x build after the Supabase persistence/security remediation.
+This report corresponds to the 3.0.1 build after the upload, deployment-configuration, and request-handling review.
 
-## Remediated
-- GitHub Pages remains a static deployment through `.github/workflows/pages.yml`.
-- OAuth state + PKCE is bound to the initiating browser with a short-lived HttpOnly cookie.
-- OAuth state and SSE tickets are consumed once.
-- Git repository configuration/hooks are sanitized before Git commands run; global/system Git config and terminal prompts are disabled.
-- Archives enforce entry-count, expanded-size, decompression-ratio, and depth limits; link/device entries are rejected.
-- Direct package versions are pinned in `package.json`; the security-sensitive `tar` dependency is pinned to 7.5.22.
-- Docker's documented/default port matches the server default.
-- Android builds use `scripts/build-android.mjs` and generate the canonical Capacitor project when absent.
-- Backend Supabase secrets are not shipped in the GitHub Pages artifact or the distributable ZIP.
+## Remediated in this release
+- Cross-filesystem upload moves no longer fail with `EXDEV`; uploads fall back from rename to copy-and-delete when required.
+- Authentication is checked before multipart upload parsing, preventing unauthenticated requests from first consuming upload disk space.
+- External GitHub API/OAuth calls have a configurable 30-second timeout by default.
+- GitHub Pages `public/config.js` points at the active Render deployment URL used by this project.
+- Static JavaScript syntax verification is available through `npm run verify`.
+- Generated Android/Gradle build output is ignored by Git while application release directories remain trackable.
 
-## Intentionally unchanged
-This remediation pass does **not** add a general-purpose API/request rate limiter.
+## Existing protections retained
+- GitHub OAuth state + PKCE bound to the initiating browser.
+- Encrypted GitHub tokens stored only server-side.
+- Supabase Postgres + private Storage for durable project data.
+- Archive entry, size, decompression-ratio, depth, and link/device safeguards.
+- Git repository sanitization, disabled hooks, and disabled terminal prompts.
+- Per-project ownership checks and snapshot retention.
+
+## Validation
+- Node syntax checks pass for all JavaScript source files.
+- `npm run verify` passes for the packaged source tree.
+- A live runtime smoke test could not be executed in the packaging environment because npm dependency installation timed out and the runtime had no installed `node_modules`; the source and configuration checks above were still completed.
 
 ## Operational requirements
-- Configure secrets in Render; do not commit `.env`.
-- Run `supabase/schema.sql` in Supabase SQL Editor.
-- Generate/commit `package-lock.json` from a networked npm environment before a release requiring strict dependency reproducibility.
-- Rotate any Supabase secret that has previously been exposed.
+- Run `supabase/schema.sql` once in Supabase SQL Editor.
+- Configure Render secrets from `.env.example`; never commit `.env`.
+- Keep the GitHub OAuth callback URL set to the Render callback endpoint.
+- Generate a `package-lock.json` in a networked npm environment before switching CI from `npm install` to `npm ci`.

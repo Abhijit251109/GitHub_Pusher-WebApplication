@@ -19,34 +19,26 @@ Health: /api/health
 Set the variables in `.env.example`, including:
 
 ```env
-PUBLIC_BASE_URL=https://github-pusher-g3ac.onrender.com
-FRONTEND_URL=https://abhijit251109.github.io/GitHub_Pusher-WebApplication/
+PUBLIC_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com
+FRONTEND_URL=https://USERNAME.github.io/REPOSITORY
 SUPABASE_URL=https://YOUR-PROJECT.supabase.co
-SUPABASE_SECRET_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
 Render Free's filesystem is ephemeral, so do not store application data under `/app/data`. The server only uses temporary local space for upload and Git operations; durable state is in Supabase.
-
-### Exact production URLs for this build
-
-```text
-FRONTEND_URL=https://abhijit251109.github.io/GitHub_Pusher-WebApplication/
-PUBLIC_BASE_URL=https://github-pusher-g3ac.onrender.com
-GITHUB_CALLBACK_URL=https://github-pusher-g3ac.onrender.com/auth/github/callback
-```
 
 ## 3. GitHub OAuth
 
 In the GitHub OAuth App, use:
 
 - Homepage URL: your GitHub Pages URL
-- Redirect URI: `https://github-pusher-g3ac.onrender.com/auth/github/callback`
+- Authorization callback URL: `https://YOUR-RENDER-SERVICE.onrender.com/auth/github/callback`
 
 The backend uses `state` and PKCE S256 for the OAuth web flow.
 
-## 4. Optional personal-account allowlist
+## 4. Personal-account allowlist
 
-The included deployment defaults to open GitHub OAuth after a successful authorization. For a private/personal-only deployment, enable the allowlist and provide the numeric GitHub user ID:
+For a personal deployment, keep:
 
 ```env
 REQUIRE_GITHUB_ALLOWLIST=true

@@ -3,9 +3,13 @@
   const configured = trimBase((window.GPP_CONFIG || {}).API_BASE || '');
   const isPagesHost = /(^|\.)github\.io$/.test(location.hostname) || /(^|\.)githubusercontent\.com$/.test(location.hostname);
   const stored = trimBase(sessionStorage.getItem('gpp_app_url') || localStorage.getItem('gpp_app_url') || '');
-  // Explicit deployment configuration always wins over stale browser storage.
-  const saved = configured || stored;
-  if (configured && stored !== configured) {
+  // On GitHub Pages, deployment config must take precedence over stale browser storage.
+  const saved = isPagesHost ? (configured || stored) : (stored || configured);
+  if (isPagesHost && configured && stored && stored !== configured) {
+    sessionStorage.removeItem('gpp_app_url');
+    localStorage.removeItem('gpp_app_url');
+  }
+  if (isPagesHost && configured) {
     sessionStorage.setItem('gpp_app_url', configured);
     localStorage.setItem('gpp_app_url', configured);
   }

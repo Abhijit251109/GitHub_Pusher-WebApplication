@@ -16,3 +16,11 @@ release/
 *.env.local
 *.env.production
 *.env.backup
+
+# Generated Android/Gradle output
+android/
+.gradle/
+native/android/.gradle/
+native/android/build/
+native/android/app/build/
+native/android/local.properties
