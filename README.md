@@ -1,4 +1,4 @@
-# GitHub Project Pusher 3.0.1
+# GitHub Project Pusher 3.0.0
 
 A public-hostable GitHub project library with a static GitHub Pages frontend, a free Render Node backend, and persistent Supabase Postgres + private Storage.
 
@@ -15,6 +15,10 @@ A public-hostable GitHub project library with a static GitHub Pages frontend, a 
 - Background GitHub sync and fast-forward pulls
 - Dirty-tree conflict protection
 - Installable PWA
+- Dark / light / system theme selector
+- Feedback stored as `.txt` submissions and mirrored to private Supabase Storage
+- Contribution proposals stored as `.json` submissions and mirrored to private Supabase Storage
+- Contact display for GitHub profile and email
 - GitHub Pages-compatible static frontend
 - Electron desktop shell and Capacitor Android source
 

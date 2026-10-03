@@ -10,6 +10,8 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
+      - key: NODE_VERSION
+        value: "20.20.2"
       - key: HOST
         value: 0.0.0.0
       - key: PORT
@@ -38,6 +40,10 @@ services:
         value: "10"
       - key: APP_NAME
         value: GitHub Project Pusher
+      - key: PUBLIC_GITHUB_URL
+        sync: false
+      - key: PUBLIC_CONTACT_EMAIL
+        sync: false
       - key: PUBLIC_BASE_URL
         sync: false
       - key: FRONTEND_URL
@@ -61,11 +67,9 @@ services:
       - key: GITHUB_CALLBACK_URL
         sync: false
       - key: GITHUB_OAUTH_SCOPE
-        value: repo offline_access
+        value: repo user:email offline_access
       - key: GITHUB_ALLOW_SIGNUP
         value: "true"
-      - key: EXTERNAL_FETCH_TIMEOUT_MS
-        value: "30000"
       - key: REQUIRE_GITHUB_ALLOWLIST
         value: "true"
       - key: ALLOWED_GITHUB_USER_IDS

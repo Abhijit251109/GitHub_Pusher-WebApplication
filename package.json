@@ -1,6 +1,6 @@
 {
   "name": "github-project-pusher",
-  "version": "3.0.1",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,8 +10,7 @@
     "build:desktop": "electron-builder --config electron-builder.yml",
     "build:windows-installer": "electron-builder --config electron-builder.yml --win msi",
     "build:android": "node scripts/build-android.mjs",
-    "prepare:android": "node scripts/prepare-android.mjs",
-    "verify": "node scripts/verify-project.mjs"
+    "prepare:android": "node scripts/prepare-android.mjs"
   },
   "dependencies": {
     "express": "5.1.0",
@@ -27,5 +26,8 @@
     "electron": "39.0.0",
     "electron-builder": "26.0.12"
   },
-  "main": "electron/main.cjs"
+  "main": "electron/main.cjs",
+  "engines": {
+    "node": ">=20.20.2 <21.0.0"
+  }
 }

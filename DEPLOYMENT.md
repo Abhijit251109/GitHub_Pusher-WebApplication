@@ -77,3 +77,11 @@ Supabase project URL configured for this build:
 `https://vsrooptemnxxqolzbeze.supabase.co`
 
 The Supabase publishable key is safe for the browser bundle; the Supabase secret key remains backend-only in `.env`/Render environment variables.
+
+## Runtime pin
+
+This repository pins Node 20.20.2 to prevent Render from selecting its newer Node 24 default. Node 20 is EOL upstream, so upgrade the runtime deliberately rather than letting the hosting default change it unexpectedly.
+
+## Feedback and contribution storage
+
+User feedback is stored as `.txt` files under `./feedback` and contribution proposals as `.json` files under `./contribute`. The backend also mirrors these submissions to the private Supabase Storage bucket when persistence is configured.

@@ -3,7 +3,6 @@ const trimBase = value => String(value || '').trim().replace(/\/+$/, '');
 const IS_PAGES_HOST = /(^|\.)github\.io$/.test(location.hostname) || /(^|\.)githubusercontent\.com$/.test(location.hostname);
 const CONFIGURED_API_BASE = trimBase(CONFIG.API_BASE || '');
 const STORED_API_BASE = trimBase(sessionStorage.getItem('gpp_app_url') || localStorage.getItem('gpp_app_url') || '');
-// Never let stale localhost storage override the configured production API on GitHub Pages.
 const API_BASE = trimBase(IS_PAGES_HOST ? (CONFIGURED_API_BASE || STORED_API_BASE) : (STORED_API_BASE || CONFIGURED_API_BASE));
 if (IS_PAGES_HOST && CONFIGURED_API_BASE && STORED_API_BASE !== CONFIGURED_API_BASE) {
   sessionStorage.setItem('gpp_app_url', CONFIGURED_API_BASE);
@@ -13,26 +12,121 @@ const API_ORIGIN = API_BASE || window.location.origin;
 const tokenStore = window.sessionStorage;
 const getToken = () => tokenStore.getItem('gpp_access_token') || '';
 const apiUrl = path => new URL(path.replace(/^\/+/, ''), API_ORIGIN.replace(/\/+$/, '') + '/').toString();
-let projects=[];let selectedId=null;let deferredInstall=null;
-const $=id=>document.getElementById(id);
-const toast=(msg)=>{const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)};
-async function api(url,opts={}){const headers=new Headers(opts.headers||{});const token=getToken();if(token)headers.set('Authorization',`Bearer ${token}`);const r=await fetch(apiUrl(url),{credentials:'include',...opts,headers});if(!r.ok){let d={};try{d=await r.json()}catch{}throw new Error(d.error||`Request failed (${r.status})`)}return r.json()}
-function render(){const q=$('search').value.trim().toLowerCase();const list=projects.filter(p=>p.name.toLowerCase().includes(q));$('projectSummary').textContent=`${projects.length} project${projects.length===1?'':'s'}`;$('projectList').innerHTML=list.map(p=>`<div class="project-row ${p.id===selectedId?'selected':''}" data-id="${p.id}"><div class="project-icon">⌁</div><div class="project-main"><div class="project-name">${escapeHtml(p.name)}</div><div class="project-meta">${p.files||0} files · ${p.repoFullName||'Local only'} · ${p.lastSyncAt?'synced '+formatDate(p.lastSyncAt):'not synced'}</div></div><span class="state ${p.syncState==='conflict'?'conflict':p.syncState==='error'?'error':''}">${escapeHtml(p.syncState||'local')}</span></div>`).join('');$('empty').hidden=list.length>0||projects.length>0;document.querySelectorAll('.project-row').forEach(x=>x.onclick=()=>selectProject(x.dataset.id));renderDetails()}
-function renderDetails(){const p=projects.find(x=>x.id===selectedId);const has=!!p;$('details').hidden=!has;$('detailsEmpty').hidden=has;$('pushBtn').disabled=!has;$('removeBtn').disabled=!has;if(!has){$('snapshotList').innerHTML='';return}$('details').innerHTML=`<dl><dt>Name</dt><dd>${escapeHtml(p.name)}</dd><dt>Files</dt><dd>${p.files||0}</dd><dt>GitHub</dt><dd>${p.repoFullName?`<a href="${p.repoUrl}" target="_blank" rel="noreferrer">${escapeHtml(p.repoFullName)}</a>`:'Not connected'}</dd><dt>Branch</dt><dd>${escapeHtml(p.branch||'—')}</dd><dt>Sync</dt><dd>${escapeHtml(p.syncMessage||'—')}</dd><dt>Last push</dt><dd>${p.lastPushedAt?formatDate(p.lastPushedAt):'—'}</dd><dt>Last pull</dt><dd>${p.lastSyncAt?formatDate(p.lastSyncAt):'—'}</dd></dl>`;loadHistory(p.id)}
-async function selectProject(id){selectedId=id;render()}
-function formatBytes(n){if(n<1024)return `${n} B`;if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`;if(n<1024*1024*1024)return `${(n/1024/1024).toFixed(1)} MB`;return `${(n/1024/1024/1024).toFixed(1)} GB`}
-function renderDownloads(items, targetId){const el=$(targetId);if(!el)return;const groups={windows:[],macos:[],android:[],linux:[]};for(const item of items){if(groups[item.platform])groups[item.platform].push(item)}const cards=[];for(const platform of ['windows','macos','android','linux']){const label={windows:'Windows',macos:'macOS',android:'Android',linux:'Linux'}[platform];for(const item of groups[platform]){const href=apiUrl(item.url);cards.push(`<div class="download-card"><div><div class="download-title">${label}</div><div class="download-meta">${escapeHtml(item.name)} · ${formatBytes(item.size)} · ${formatDate(item.modifiedAt)}</div></div><a class="secondary" href="${href}">Download</a></div>`)}}el.innerHTML=cards.length?cards.join(''):'<div class="muted download-empty">No Windows or Android builds have been uploaded yet.</div>'}
+let projects = [];
+let selectedId = null;
+let deferredInstall = null;
+const $ = id => document.getElementById(id);
+const toast = msg => { const t = $('toast'); if (!t) return; t.textContent = msg; t.classList.add('show'); setTimeout(() => t.classList.remove('show'), 2600); };
+async function api(url, opts = {}) {
+  const headers = new Headers(opts.headers || {});
+  const token = getToken();
+  if (token) headers.set('Authorization', `Bearer ${token}`);
+  const r = await fetch(apiUrl(url), { credentials:'include', ...opts, headers });
+  if (!r.ok) { let d = {}; try { d = await r.json(); } catch {} throw new Error(d.error || `Request failed (${r.status})`); }
+  return r.json();
+}
+function render() {
+  const search = $('search');
+  const q = search ? search.value.trim().toLowerCase() : '';
+  const list = projects.filter(p => p.name.toLowerCase().includes(q));
+  $('projectSummary').textContent = `${projects.length} project${projects.length === 1 ? '' : 's'}`;
+  $('projectList').innerHTML = list.map(p => `<div class="project-row ${p.id===selectedId?'selected':''}" data-id="${p.id}"><div class="project-icon">⌁</div><div class="project-main"><div class="project-name">${escapeHtml(p.name)}</div><div class="project-meta">${p.files||0} files · ${p.repoFullName||'Local only'} · ${p.lastSyncAt?'synced '+formatDate(p.lastSyncAt):'not synced'}</div></div><span class="state ${p.syncState==='conflict'?'conflict':p.syncState==='error'?'error':''}">${escapeHtml(p.syncState||'local')}</span></div>`).join('');
+  $('empty').hidden = list.length > 0 || projects.length > 0;
+  document.querySelectorAll('.project-row').forEach(x => x.onclick = () => selectProject(x.dataset.id));
+  renderDetails();
+}
+function renderDetails() {
+  const p = projects.find(x => x.id === selectedId);
+  const has = !!p;
+  $('details').hidden = !has;
+  $('detailsEmpty').hidden = has;
+  $('pushBtn').disabled = !has;
+  $('removeBtn').disabled = !has;
+  if (!has) { $('snapshotList').innerHTML = ''; return; }
+  $('details').innerHTML = `<dl><dt>Name</dt><dd>${escapeHtml(p.name)}</dd><dt>Files</dt><dd>${p.files||0}</dd><dt>GitHub</dt><dd>${p.repoFullName ? `<a href="${p.repoUrl}" target="_blank" rel="noreferrer">${escapeHtml(p.repoFullName)}</a>` : 'Not connected'}</dd><dt>Branch</dt><dd>${escapeHtml(p.branch||'—')}</dd><dt>Sync</dt><dd>${escapeHtml(p.syncMessage||'—')}</dd><dt>Last push</dt><dd>${p.lastPushedAt?formatDate(p.lastPushedAt):'—'}</dd><dt>Last pull</dt><dd>${p.lastSyncAt?formatDate(p.lastSyncAt):'—'}</dd></dl>`;
+  loadHistory(p.id).catch(e => toast(e.message));
+}
+async function selectProject(id) { selectedId = id; render(); }
+function formatBytes(n) { if(n<1024)return `${n} B`; if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`; if(n<1024*1024*1024)return `${(n/1024/1024).toFixed(1)} MB`; return `${(n/1024/1024/1024).toFixed(1)} GB`; }
+function renderDownloads(items, targetId) {
+  const el=$(targetId); if(!el)return;
+  const groups={windows:[],macos:[],android:[],linux:[]};
+  for(const item of items){if(groups[item.platform])groups[item.platform].push(item)}
+  const cards=[];
+  for(const platform of ['windows','macos','android','linux']) {
+    const label={windows:'Windows',macos:'macOS',android:'Android',linux:'Linux'}[platform];
+    for(const item of groups[platform]) cards.push(`<div class="download-card"><div><div class="download-title">${label}</div><div class="download-meta">${escapeHtml(item.name)} · ${formatBytes(item.size)} · ${formatDate(item.modifiedAt)}</div></div><a class="secondary" href="${apiUrl(item.url)}">Download</a></div>`);
+  }
+  el.innerHTML=cards.length?cards.join(''):'<div class="muted download-empty">No Windows or Android builds have been uploaded yet.</div>';
+}
 async function loadApplications(){try{const items=await api('/api/applications');renderDownloads(items,'downloadList');renderDownloads(items,'downloadListApp')}catch{renderDownloads([],'downloadList');renderDownloads([],'downloadListApp')}}
-async function load(){await loadApplications();const me=await api('/api/auth/me');$('authView').hidden=me.authenticated;$('appView').hidden=!me.authenticated;if(!me.authenticated)return;$('userBox').innerHTML=`<span class="muted">@${escapeHtml(me.user.login)}</span> <button class="ghost" id="logout">Sign out</button>`;$('logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});tokenStore.removeItem('gpp_access_token');location.reload()};await refresh();connectEvents()}
+async function load(){
+  await loadApplications();
+  const me=await api('/api/auth/me');
+  $('authView').hidden=me.authenticated;
+  $('appView').hidden=!me.authenticated;
+  if(!me.authenticated) return;
+  const accountEmail = me.user.email ? ` <a class="user-email" href="mailto:${encodeURIComponent(me.user.email)}">${escapeHtml(me.user.email)}</a>` : '';
+  const githubUrl = `https://github.com/${encodeURIComponent(me.user.login)}`;
+  $('userBox').innerHTML=`<a class="user-link" href="${githubUrl}" target="_blank" rel="noreferrer">@${escapeHtml(me.user.login)}</a>${accountEmail} <button class="ghost" id="logout">Sign out</button>`;
+  $('accountContact').innerHTML = `<a href="${githubUrl}" target="_blank" rel="noreferrer">GitHub: @${escapeHtml(me.user.login)}</a><span>${me.user.email ? `Email: <a href="mailto:${encodeURIComponent(me.user.email)}">${escapeHtml(me.user.email)}</a>` : 'Email: unavailable from GitHub'}</span>`;
+  document.querySelectorAll('#feedbackForm [name=github],#contributeForm [name=github]').forEach(input => { input.value = me.user.login || ''; });
+  document.querySelectorAll('#feedbackForm [name=email],#contributeForm [name=email]').forEach(input => { input.value = me.user.email || ''; });
+  $('logout').onclick=async()=>{try{await api('/api/auth/logout',{method:'POST'})}finally{tokenStore.removeItem('gpp_access_token');location.reload()}};
+  await refresh();
+  connectEvents();
+}
 async function refresh(){await loadApplications();projects=await api('/api/projects');if(selectedId&&!projects.some(p=>p.id===selectedId))selectedId=null;render()}
-async function loadHistory(id){const h=await api(`/api/projects/${id}/history`);$('snapshotList').innerHTML=h.length?h.map(x=>`<div class="snap"><strong>${escapeHtml(x.label||'snapshot')}</strong><span>${escapeHtml(x.createdAt||'')}</span></div>`).join(''):'<div class="muted">No snapshots yet.</div>'}
-async function connectEvents(){try{const t=await api('/api/events/ticket',{method:'GET'});const es=new EventSource(apiUrl(`/api/events?ticket=${encodeURIComponent(t.ticket)}`));es.onopen=()=>{$('liveDot').style.background='#22c55e';$('liveText').textContent='Live sync connected'};es.onerror=()=>{$('liveDot').style.background='#ef4444';$('liveText').textContent='Reconnecting…'};es.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='project-updated'||d.type==='projects-changed'){refresh()}else if(d.type==='sync-conflict'){toast('Remote changes found; local edits were kept safe.');refresh()}else if(d.type==='sync-error'){toast('A sync error occurred. Check the project status.');refresh()}}}catch{}}
-async function addProject(){const files=[...($('folderInput').files||[]),...($('fileInput').files||[])];if(!files.length){toast('Choose a folder or files first.');return}const fd=new FormData();fd.append('projectName',$('projectName').value);files.forEach(f=>fd.append('files',f,f.webkitRelativePath||f.name));$('saveProject').disabled=true;try{const p=await api('/api/projects',{method:'POST',body:fd});selectedId=p.id;toast('Project added to your persistent cloud library.');$('addDialog').close();$('folderInput').value='';$('fileInput').value='';$('projectName').value='';await refresh()}catch(e){toast(e.message)}finally{$('saveProject').disabled=false}}
-async function openPush(){const p=projects.find(x=>x.id===selectedId);if(!p)return;$('pushProjectName').textContent=p.name;const repos=await api('/api/github/repos');$('repoSelect').innerHTML='<option value="">＋ Create a new repository</option>'+repos.map(r=>`<option value="${r.id}" data-branch="${escapeHtml(r.default_branch||'main')}">${escapeHtml(r.full_name)}${r.private?' 🔒':''}</option>`).join('');$('newRepoName').value=p.repoFullName?.split('/')[1]||p.name;$('branch').value=p.branch||'main';toggleNewRepo();$('pushDialog').showModal()}
+async function loadHistory(id){const h=await api(`/api/projects/${id}/history`);$('snapshotList').innerHTML=h.length?h.map(x=>`<div class="snap"><strong>${escapeHtml(x.label||'snapshot')}</strong><span>${escapeHtml(formatDate(x.createdAt||''))}</span></div>`).join(''):'<div class="muted">No snapshots yet.</div>'}
+async function connectEvents(){
+  try{
+    const t=await api('/api/events/ticket',{method:'GET'});
+    const es=new EventSource(apiUrl(`/api/events?ticket=${encodeURIComponent(t.ticket)}`));
+    es.onopen=()=>{$('liveDot').style.background='#22c55e';$('liveText').textContent='Live sync connected'};
+    es.onerror=()=>{$('liveDot').style.background='#ef4444';$('liveText').textContent='Reconnecting…'};
+    es.onmessage=e=>{const d=JSON.parse(e.data);if(d.type==='project-updated'||d.type==='projects-changed'){refresh()}else if(d.type==='sync-conflict'){toast('Remote changes found; local edits were kept safe.');refresh()}else if(d.type==='sync-error'){toast('A sync error occurred. Check the project status.');refresh()}};
+  }catch{}
+}
+async function addProject(){
+  const files=[...($('folderInput').files||[]),...($('fileInput').files||[])];
+  if(!files.length){toast('Choose a folder or files first.');return}
+  const fd=new FormData();fd.append('projectName',$('projectName').value);files.forEach(f=>fd.append('files',f,f.webkitRelativePath||f.name));$('saveProject').disabled=true;
+  try{const p=await api('/api/projects',{method:'POST',body:fd});selectedId=p.id;toast('Project added to your persistent cloud library.');$('addDialog').close();$('folderInput').value='';$('fileInput').value='';$('projectName').value='';await refresh()}catch(e){toast(e.message)}finally{$('saveProject').disabled=false}
+}
+async function openPush(){
+  const p=projects.find(x=>x.id===selectedId);if(!p)return;
+  $('pushProjectName').textContent=p.name;
+  const repos=await api('/api/github/repos');
+  $('repoSelect').innerHTML='<option value="">＋ Create a new repository</option>'+repos.map(r=>`<option value="${r.id}" data-branch="${escapeHtml(r.default_branch||'main')}">${escapeHtml(r.full_name)}${r.private?' 🔒':''}</option>`).join('');
+  $('newRepoName').value=p.repoFullName?.split('/')[1]||p.name;$('branch').value=p.branch||'main';toggleNewRepo();$('pushDialog').showModal();
+}
 function toggleNewRepo(){const newOne=!$('repoSelect').value;$('newRepoRow').hidden=!newOne;$('visibilityRow').hidden=!newOne;if(!newOne){const opt=$('repoSelect').selectedOptions[0];$('branch').value=opt?.dataset.branch||'main'}}
-async function push(){const p=projects.find(x=>x.id===selectedId);const repoId=$('repoSelect').value;const body={projectId:p.id,repoId:repoId||null,repoName:$('newRepoName').value,visibility:$('visibility').value,branch:$('branch').value.trim()||'main'};$('confirmPush').disabled=true;try{const r=await api('/api/github/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast(`Pushed to ${r.repo.full_name}`);$('pushDialog').close();await refresh()}catch(e){toast(e.message)}finally{$('confirmPush').disabled=false}}
+async function push(){
+  const p=projects.find(x=>x.id===selectedId); if(!p)return;
+  const repoId=$('repoSelect').value;
+  const body={projectId:p.id,repoId:repoId||null,repoName:$('newRepoName').value,visibility:$('visibility').value,branch:$('branch').value.trim()||'main'};
+  $('confirmPush').disabled=true;
+  try{const r=await api('/api/github/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});toast(`Pushed to ${r.repo.full_name}`);$('pushDialog').close();await refresh()}catch(e){toast(e.message)}finally{$('confirmPush').disabled=false}
+}
 async function removeProject(){const p=projects.find(x=>x.id===selectedId);if(!p||!confirm(`Remove ${p.name} from your project library? This removes the persistent cloud copy and snapshots, not the GitHub repo.`))return;await api(`/api/projects/${p.id}`,{method:'DELETE'});selectedId=null;toast('Project removed.');await refresh()}
 function install(){if(deferredInstall){deferredInstall.prompt();deferredInstall.userChoice.finally(()=>{deferredInstall=null})}else toast('Use your browser menu → Install app / Add to Home screen.')}
-function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}function formatDate(s){try{return new Date(s).toLocaleString()}catch{return s}}
-$('addBtn').onclick=()=>$('addDialog').showModal();$('addForm').onsubmit=e=>{e.preventDefault();addProject()};$('pushBtn').onclick=openPush;$('pushForm').onsubmit=e=>{e.preventDefault();push()};$('repoSelect').onchange=toggleNewRepo;$('removeBtn').onclick=removeProject;$('refreshBtn').onclick=refresh;$('search').oninput=render;$('folderInput').onchange=updateCount;$('fileInput').onchange=updateCount;$('installBtn').onclick=install;$('installBtn2').onclick=install;function updateCount(){const n=($('folderInput').files?.length||0)+($('fileInput').files?.length||0);$('addCount').textContent=`${n} file${n===1?'':'s'} selected`}
-const loginLink=$('loginLink');if(loginLink)loginLink.href='login.html';window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;$('installBtn').hidden=false});window.addEventListener('appinstalled',()=>{$('installBtn').hidden=true;toast('App installed.')});if('serviceWorker' in navigator)navigator.serviceWorker.register(new URL('sw.js',document.baseURI)).catch(()=>{});load().catch(e=>toast(e.message));
+function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
+function formatDate(s){try{return new Date(s).toLocaleString()}catch{return s}}
+$('addBtn').onclick=()=>$('addDialog').showModal();
+$('addForm').onsubmit=e=>{e.preventDefault();addProject()};
+$('pushBtn').onclick=openPush;
+$('pushForm').onsubmit=e=>{e.preventDefault();push()};
+$('repoSelect').onchange=toggleNewRepo;
+$('removeBtn').onclick=removeProject;
+$('refreshBtn').onclick=refresh;
+$('search').oninput=render;
+$('folderInput').onchange=updateCount;
+$('fileInput').onchange=updateCount;
+$('installBtn').onclick=install;
+$('installBtn2').onclick=install;
+function updateCount(){const n=($('folderInput').files?.length||0)+($('fileInput').files?.length||0);$('addCount').textContent=`${n} file${n===1?'':'s'} selected`}
+const loginLink=$('loginLink');if(loginLink)loginLink.href='login.html';
+window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;$('installBtn').hidden=false});
+window.addEventListener('appinstalled',()=>{$('installBtn').hidden=true;toast('App installed.')});
+if('serviceWorker' in navigator)navigator.serviceWorker.register(new URL('sw.js',document.baseURI)).catch(()=>{});
+load().catch(e=>toast(e.message));

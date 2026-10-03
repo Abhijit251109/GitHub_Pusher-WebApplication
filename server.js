@@ -7,7 +7,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import * as tar from 'tar';
+import tar from 'tar';
 import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
@@ -16,6 +16,8 @@ const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = process.cwd();
 const APPLICATIONS = path.join(ROOT, 'application');
+const FEEDBACK_DIR = path.join(ROOT, 'feedback');
+const CONTRIBUTE_DIR = path.join(ROOT, 'contribute');
 const APPLICATION_PLATFORMS = {
   windows: ['.msi', '.exe'],
   macos: ['.dmg', '.pkg', '.zip'],
@@ -46,7 +48,7 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
-const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
+const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo user:email offline_access';
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
@@ -62,6 +64,8 @@ const supabase = hasSupabase
 
 await fs.mkdir(UPLOAD_TEMP, { recursive: true });
 await fs.mkdir(APPLICATIONS, { recursive: true });
+await fs.mkdir(FEEDBACK_DIR, { recursive: true });
+await fs.mkdir(CONTRIBUTE_DIR, { recursive: true });
 await Promise.all(Object.keys(APPLICATION_PLATFORMS).map(platform => fs.mkdir(path.join(APPLICATIONS, platform), { recursive: true })));
 
 const upload = multer({
@@ -200,13 +204,6 @@ function getBearerToken(req) {
   return header.startsWith('Bearer ') ? header.slice(7).trim() : null;
 }
 function requestHasBearer(req) { return Boolean(getBearerToken(req)); }
-const EXTERNAL_FETCH_TIMEOUT_MS = Number(process.env.EXTERNAL_FETCH_TIMEOUT_MS || 30000);
-function fetchWithTimeout(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), EXTERNAL_FETCH_TIMEOUT_MS);
-  return fetch(url, { ...options, signal: options.signal || controller.signal })
-    .finally(() => clearTimeout(timeout));
-}
 
 async function queryOne(table, builder) {
   supabaseRequired();
@@ -218,7 +215,7 @@ async function queryOne(table, builder) {
 function userFromRow(row) {
   if (!row) return null;
   return {
-    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar,
+    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar, email: row.email || null,
     githubTokenEnc: row.github_token_enc, githubRefreshTokenEnc: row.github_refresh_token_enc,
     githubExpiresAt: row.github_expires_at ? new Date(row.github_expires_at).getTime() : null,
     githubRefreshExpiresAt: row.github_refresh_expires_at ? new Date(row.github_refresh_expires_at).getTime() : null
@@ -247,12 +244,21 @@ function projectToRow(p) {
 async function dbUserUpsert(user) {
   const row = {
     id: String(user.id), login: user.login, name: user.name, avatar: user.avatar,
+    email: user.email || null,
     github_token_enc: user.githubTokenEnc, github_refresh_token_enc: user.githubRefreshTokenEnc || null,
     github_expires_at: user.githubExpiresAt ? new Date(user.githubExpiresAt).toISOString() : null,
     github_refresh_expires_at: user.githubRefreshExpiresAt ? new Date(user.githubRefreshExpiresAt).toISOString() : null,
     updated_at: nowIso()
   };
-  await queryOne('users', supabase.from('users').upsert(row, { onConflict: 'id' }));
+  try {
+    await queryOne('users', supabase.from('users').upsert(row, { onConflict: 'id' }));
+  } catch (error) {
+    // Keep existing deployments usable until the one-line users.email migration has been run.
+    if (!/email|column/i.test(String(error.message || ''))) throw error;
+    const legacy = { ...row };
+    delete legacy.email;
+    await queryOne('users', supabase.from('users').upsert(legacy, { onConflict: 'id' }));
+  }
   return user;
 }
 async function dbGetUser(userId) {
@@ -463,21 +469,6 @@ async function persistWorkingTree(project, work) {
     await fs.rm(archive, { force: true }).catch(() => {});
   }
 }
-async function moveUploadedFile(source, target) {
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  try {
-    await fs.rename(source, target);
-  } catch (error) {
-    // Render/containers can place multer's directory and the working tree on
-    // different filesystems. rename() then fails with EXDEV. Copy + remove is
-    // portable across filesystems and is safe here because the upload is
-    // bounded by multer's file-size limit.
-    if (error?.code !== 'EXDEV') throw error;
-    await fs.copyFile(source, target);
-    await fs.rm(source, { force: true });
-  }
-}
-
 async function countFiles(root) {
   let count = 0;
   async function walk(dir) {
@@ -534,17 +525,28 @@ function githubHeaders(token) {
   return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': APP_NAME };
 }
 async function githubFetch(url, options = {}) {
-  const r = await fetchWithTimeout(url, options);
+  const r = await fetch(url, options);
   const text = await r.text();
   let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
   if (!r.ok) throw new Error((data && data.message) || `GitHub API error ${r.status}`);
   return data;
 }
+async function githubPrimaryEmail(token, profileEmail = null) {
+  try {
+    const emails = await githubFetch('https://api.github.com/user/emails', { headers: githubHeaders(token) });
+    if (Array.isArray(emails)) {
+      const primary = emails.find(item => item.primary && item.verified) || emails.find(item => item.verified) || emails.find(item => item.primary);
+      if (primary?.email) return String(primary.email).trim();
+    }
+  } catch {}
+  return profileEmail ? String(profileEmail).trim() : null;
+}
+
 async function userToken(user) {
   if (!user.githubTokenEnc) return null;
   if (user.githubExpiresAt && user.githubExpiresAt - Date.now() < 60_000 && user.githubRefreshTokenEnc) {
     const refresh = decrypt(user.githubRefreshTokenEnc);
-    const response = await fetchWithTimeout('https://github.com/login/oauth/access_token', {
+    const response = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, grant_type: 'refresh_token', refresh_token: refresh })
     });
@@ -596,9 +598,21 @@ async function ensureGit(dir, cloneUrl) {
 function askpassScript() { return path.join(os.tmpdir(), `gpp-askpass-${crypto.randomUUID()}.cjs`); }
 async function withGitAuth(token, fn) {
   const file = askpassScript();
-  await fs.writeFile(file, `const p=process.argv.slice(2).join(' ');process.stdout.write(/username/i.test(p)?'x-access-token':(process.env.GH_TOKEN||''));\n`);
-  try { await fs.chmod(file, 0o700); return await fn({ GIT_ASKPASS: file, GH_TOKEN: token, GIT_TERMINAL_PROMPT: '0' }); }
-  finally { await fs.rm(file, { force: true }); }
+  const script = [
+    '#!/usr/bin/env node',
+    "const prompt=process.argv.slice(2).join(' ');",
+    "process.stdout.write(/username|login/i.test(prompt) ? 'x-access-token' : (process.env.GH_TOKEN || ''));",
+    ''
+  ].join('\n');
+  await fs.writeFile(file, script, { mode: 0o700 });
+  try {
+    return await fn({
+      GIT_ASKPASS: file,
+      GIT_ASKPASS_REQUIRE: 'force',
+      GH_TOKEN: token,
+      GIT_TERMINAL_PROMPT: '0'
+    });
+  } finally { await fs.rm(file, { force: true }); }
 }
 async function runGit(cwd, args, env = {}) {
   return execFileAsync('git', args, {
@@ -658,7 +672,7 @@ app.get('/api/auth/me', async (req, res) => {
   try {
     const a = await authUser(req, res, false);
     if (!a) return res.json({ authenticated: false });
-    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
+    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar, email: a.user.email || null } });
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
@@ -697,17 +711,18 @@ app.get('/auth/github/callback', async (req, res) => {
       return res.status(400).send('Invalid, expired, or browser-mismatched OAuth state.');
     }
     const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
-    const tokenResponse = await fetchWithTimeout('https://github.com/login/oauth/access_token', {
+    const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.query.code, state: req.query.state, redirect_uri: redirectUri, code_verifier: attempt.code_verifier })
     });
     const tokenData = await tokenResponse.json();
     if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) throw new Error(tokenData.error_description || 'OAuth exchange failed.');
     const ghUser = await githubFetch('https://api.github.com/user', { headers: githubHeaders(tokenData.access_token) });
+    const email = await githubPrimaryEmail(tokenData.access_token, ghUser.email);
     const userId = String(ghUser.id);
     if (REQUIRE_GITHUB_ALLOWLIST && !ALLOWED_GITHUB_USER_IDS.has(userId)) return res.status(403).send('This GitHub account is not authorized to use this application.');
     const user = {
-      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url,
+      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url, email,
       githubTokenEnc: encrypt(tokenData.access_token),
       githubRefreshTokenEnc: tokenData.refresh_token ? encrypt(tokenData.refresh_token) : null,
       githubExpiresAt: tokenData.expires_in ? Date.now() + Number(tokenData.expires_in) * 1000 : null,
@@ -734,7 +749,7 @@ app.post('/api/auth/exchange', ensureRequestProtection, async (req, res) => {
     if (!row) return res.status(401).json({ error: 'Login code is invalid or expired.' });
     const token = await createSession(row.user_id);
     const user = await dbGetUser(row.user_id);
-    return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar } });
+    return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar, email: user.email || null } });
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
@@ -745,6 +760,76 @@ app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
     if (cookie) res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; ${cookieOptions()}; Max-Age=0`);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+function cleanSubmissionText(value, max = 4000) {
+  return String(value ?? '').replace(/\u0000/g, '').replace(/\r/g, '').trim().slice(0, max);
+}
+function submissionFileStem() {
+  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}`;
+}
+async function saveSubmission(kind, extension, content, contentType) {
+  const dir = kind === 'feedback' ? FEEDBACK_DIR : CONTRIBUTE_DIR;
+  const filename = `${submissionFileStem()}${extension}`;
+  const fullPath = path.join(dir, filename);
+  await fs.writeFile(fullPath, content, 'utf8');
+  if (supabase) {
+    await storageUpload(`${kind}/${filename}`, Buffer.from(content, 'utf8'), contentType).catch(() => {});
+  }
+  return { filename, path: path.relative(ROOT, fullPath).replaceAll(path.sep, '/') };
+}
+async function optionalAuthenticatedUser(req) {
+  try { return (await getSession(req, { setHeader() {} }, {}))?.user || null; } catch { return null; }
+}
+app.get('/api/public/contact', (_req, res) => {
+  res.json({
+    githubUrl: String(process.env.PUBLIC_GITHUB_URL || '').trim(),
+    email: String(process.env.PUBLIC_CONTACT_EMAIL || '').trim()
+  });
+});
+app.post('/api/feedback', ensureRequestProtection, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true }); // honeypot
+    const user = await optionalAuthenticatedUser(req);
+    const message = cleanSubmissionText(body.message, 8000);
+    if (!message) return res.status(400).json({ error: 'Please enter your feedback.' });
+    const name = cleanSubmissionText(body.name, 120) || user?.name || user?.login || 'Anonymous';
+    const email = cleanSubmissionText(body.email, 254) || user?.email || '';
+    const github = cleanSubmissionText(body.github, 120) || user?.login || '';
+    const text = [
+      'GitHub Project Pusher — Feedback',
+      `Submitted: ${nowIso()}`,
+      `Name: ${name}`,
+      `Email: ${email || '(not provided)'}`,
+      `GitHub: ${github || '(not provided)'}`,
+      '',
+      message,
+      ''
+    ].join('\n');
+    const saved = await saveSubmission('feedback', '.txt', text, 'text/plain');
+    res.json({ ok: true, filename: saved.filename });
+  } catch (e) { res.status(500).json({ error: e.message || 'Could not save feedback.' }); }
+});
+app.post('/api/contribute', ensureRequestProtection, async (req, res) => {
+  try {
+    const body = req.body || {};
+    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true }); // honeypot
+    const user = await optionalAuthenticatedUser(req);
+    const contribution = {
+      submittedAt: nowIso(),
+      name: cleanSubmissionText(body.name, 120) || user?.name || user?.login || 'Anonymous',
+      email: cleanSubmissionText(body.email, 254) || user?.email || '',
+      github: cleanSubmissionText(body.github, 120) || user?.login || '',
+      type: cleanSubmissionText(body.type, 60) || 'code',
+      title: cleanSubmissionText(body.title, 200),
+      link: cleanSubmissionText(body.link, 1000),
+      description: cleanSubmissionText(body.description, 8000)
+    };
+    if (!contribution.title || !contribution.description) return res.status(400).json({ error: 'Please provide a contribution title and description.' });
+    const saved = await saveSubmission('contribute', '.json', JSON.stringify(contribution, null, 2) + '\n', 'application/json');
+    res.json({ ok: true, filename: saved.filename });
+  } catch (e) { res.status(500).json({ error: e.message || 'Could not save contribution.' }); }
 });
 
 app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { res.status(500).json({ error: e.message }); } });
@@ -784,15 +869,12 @@ app.get('/api/projects', async (req, res) => {
     res.json(list.map(p => ({ ...p, files: p.fileCount })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/projects', ensureRequestProtection, async (req, res, next) => {
-  const a = await authUser(req, res);
-  if (!a) return;
-  req.auth = a;
+app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
   const len = Number(req.headers['content-length'] || 0);
   if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.` });
   next();
 }, upload.array('files', MAX_FILES), async (req, res) => {
-  const a = req.auth;
+  const a = await authUser(req, res); if (!a) return;
   let workspace = null;
   try {
     const files = req.files || [];
@@ -806,7 +888,8 @@ app.post('/api/projects', ensureRequestProtection, async (req, res, next) => {
       if (!rel) continue;
       const target = path.join(workspace, rel);
       if (!target.startsWith(workspace + path.sep)) continue;
-      await moveUploadedFile(file.path, target);
+      await fs.mkdir(path.dirname(target), { recursive: true });
+      await fs.rename(file.path, target);
     }
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
@@ -860,6 +943,22 @@ app.get('/api/github/repos', async (req, res) => {
     res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
+async function remoteHistoryState(dir, branch) {
+  const remoteRef = await rev(dir, `origin/${branch}`);
+  const head = await rev(dir, 'HEAD');
+  if (!remoteRef) return { remoteRef: null, head, common: true, remoteAhead: false };
+  if (!head) return { remoteRef, head: null, common: false, remoteAhead: true };
+  try {
+    await runGit(dir, ['merge-base', '--is-ancestor', remoteRef, head]);
+    return { remoteRef, head, common: true, remoteAhead: false };
+  } catch {}
+  try {
+    await runGit(dir, ['merge-base', '--is-ancestor', head, remoteRef]);
+    return { remoteRef, head, common: true, remoteAhead: true };
+  } catch {}
+  return { remoteRef, head, common: false, remoteAhead: false };
+}
+
 app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   const { projectId, repoId, repoName, visibility = 'private', branch = 'main' } = req.body || {};
@@ -879,13 +978,19 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         const dirty = await statusPorcelain(dir);
         await withGitAuth(token, async env => {
           await runGit(dir, ['fetch', 'origin'], env).catch(() => {});
-          const remoteBranch = repo.default_branch || branch;
-          if (!dirty) {
-            const remoteRef = await rev(dir, `origin/${remoteBranch}`);
-            const head = await rev(dir, 'HEAD');
-            if (remoteRef && !head) throw new Error('Selected repository already has history. Use a fresh repository or pull/merge it first.');
+          const remoteBranch = branch;
+          const history = await remoteHistoryState(dir, remoteBranch);
+          if (history.remoteRef && !history.head) {
+            throw new Error(`Repository ${repo.full_name} already has commits on ${remoteBranch}. Use a fresh repository or pull/merge it first; the app will not overwrite existing history.`);
           }
-          await runGit(dir, ['add', '-A'], env);
+          if (history.remoteRef && !history.common) {
+            throw new Error(`Repository ${repo.full_name} has unrelated Git history. Merge the histories manually (or choose an empty repository) before pushing; the app will not force-push.`);
+          }
+          if (dirty) {
+            await runGit(dir, ['add', '-A'], env);
+          } else {
+            await runGit(dir, ['add', '-A'], env);
+          }
           let changes = true;
           try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
           if (changes) await runGit(dir, ['commit', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
