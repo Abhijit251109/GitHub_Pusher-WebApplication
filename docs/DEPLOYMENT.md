@@ -20,8 +20,8 @@ Render currently offers free Node web services, but their filesystem is ephemera
 3. Render can use `render.yaml`, or you can enter the equivalent settings manually.
 4. Choose the **Free** plan.
 5. Set the secrets/environment values from `.env.example` and `render.yaml`.
-6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-pusher-g3ac.onrender.com`.
-7. Set `GITHUB_CALLBACK_URL` to `https://github-pusher-g3ac.onrender.com/auth/github/callback`.
+6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-project-pusher.onrender.com`.
+7. Set `GITHUB_CALLBACK_URL` to `https://github-project-pusher.onrender.com/auth/github/callback`.
 8. Set `FRONTEND_URL` to your GitHub Pages URL, such as `https://USERNAME.github.io/REPOSITORY`.
 
 ### Required secrets
@@ -35,7 +35,23 @@ node -e "const c=require('crypto'); console.log(c.randomBytes(32).toString('base
 
 Use the first output for `TOKEN_ENCRYPTION_KEY` and the second for `SESSION_SECRET` (or use another 32+ character random secret). Never commit either value.
 
-## 3. Configure GitHub OAuth
+## 3. Configure Auth0
+
+Create a **Single Page Application** in Auth0. Keep the **Username-Password-Authentication** and **Google** connections enabled, as shown in the Auth0 dashboard screenshot. Create a backend API and use its identifier as `AUTH0_AUDIENCE`.
+
+Set these Render variables:
+
+```env
+AUTH0_DOMAIN=dev-xxxxxxxx.us.auth0.com
+AUTH0_CLIENT_ID=YOUR_SPA_CLIENT_ID
+AUTH0_AUDIENCE=https://github-project-pusher-api
+```
+
+In the Auth0 application settings, put your exact GitHub Pages URL in **Allowed Callback URLs**, **Allowed Logout URLs**, and **Allowed Web Origins**. Add your local development origin there too when testing locally.
+
+The browser uses the Auth0 SPA JS SDK with authorization code + PKCE, and the Render API validates the resulting JWT access token against the configured Auth0 issuer and audience.
+
+## 4. Configure GitHub OAuth
 
 Create or edit your GitHub OAuth App and set:
 
@@ -44,7 +60,7 @@ Create or edit your GitHub OAuth App and set:
 
 GitHub's current OAuth documentation recommends the `state` parameter and PKCE (`S256`) for the web application flow. The backend implements both, and it exchanges the OAuth code server-side so the GitHub client secret never reaches the GitHub Pages frontend.
 
-## 4. Lock the app to your own GitHub account
+## 5. Lock the app to your own GitHub account
 
 For a personal deployment, leave these settings enabled:
 
@@ -55,7 +71,7 @@ ALLOWED_GITHUB_USER_IDS=YOUR_NUMERIC_GITHUB_USER_ID
 
 Use the numeric GitHub user ID, not the username. The server denies every other GitHub account before issuing an application session.
 
-## 5. GitHub Pages deployment
+## 6. GitHub Pages deployment
 
 The included `.github/workflows/pages.yml` publishes `public/` as a static Pages site. This does **not** run `server.js`, and it does not require Node on the Pages host.
 
@@ -76,7 +92,7 @@ window.GPP_CONFIG = { API_BASE: 'https://YOUR-RENDER-SERVICE.onrender.com' };
 
 The frontend never receives the GitHub OAuth client secret or the Supabase service-role key. The distributable ZIP also excludes `.env`; configure backend secrets in Render instead.
 
-## 6. What is persistent now?
+## 7. What is persistent now?
 
 - User records and encrypted GitHub tokens: Supabase Postgres.
 - Sessions, OAuth state, one-time login codes, and SSE tickets: Supabase Postgres.
@@ -87,7 +103,7 @@ The frontend never receives the GitHub OAuth client secret or the Supabase servi
 
 A Render restart, spin-down, or redeploy therefore does not delete the project's cloud copy. The free Render service may still sleep when idle, and Supabase Free projects may pause after inactivity, but the stored data remains in the remote datastore rather than the Render filesystem.
 
-## 7. Free-tier storage guardrails
+## 8. Free-tier storage guardrails
 
 The application defaults to:
 
@@ -97,7 +113,7 @@ The application defaults to:
 
 These conservative values keep ordinary archives under Supabase Free's per-file upload ceiling and help control storage usage. Supabase Free currently includes 1 GB of file storage and 500 MB of database size, so this is best suited to personal projects rather than a large multi-user platform.
 
-## 8. Security model
+## 9. Security model
 
 - OAuth `state` and PKCE S256 protect the sign-in flow.
 - GitHub tokens are encrypted with AES-256-GCM before they enter the database.

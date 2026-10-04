@@ -7,7 +7,9 @@ create table if not exists public.users (
   login text not null,
   name text,
   avatar text,
-  github_token_enc text not null,
+  email text,
+  auth0_sub text unique,
+  github_token_enc text,
   github_refresh_token_enc text,
   github_expires_at timestamptz,
   github_refresh_expires_at timestamptz,
@@ -33,6 +35,12 @@ create table if not exists public.oauth_attempts (
 );
 create index if not exists oauth_attempts_expires_at_idx on public.oauth_attempts(expires_at);
 alter table public.oauth_attempts add column if not exists client_cookie_hash text;
+alter table public.oauth_attempts add column if not exists user_id text references public.users(id) on delete cascade;
+alter table public.users add column if not exists email text;
+alter table public.users add column if not exists auth0_sub text;
+alter table public.users add column if not exists github_token_enc text;
+alter table public.users alter column github_token_enc drop not null;
+create unique index if not exists users_auth0_sub_idx on public.users(auth0_sub) where auth0_sub is not null;
 
 create table if not exists public.login_codes (
   code_hash text primary key,

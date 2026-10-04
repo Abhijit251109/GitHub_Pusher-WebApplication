@@ -17,7 +17,8 @@
     "multer": "2.0.2",
     "@supabase/supabase-js": "2.57.4",
     "tar": "7.5.22",
-    "helmet": "8.1.0"
+    "helmet": "8.1.0",
+    "express-oauth2-jwt-bearer": "1.10.0"
   },
   "devDependencies": {
     "@capacitor/cli": "8.0.0",
@@ -26,10 +27,5 @@
     "electron": "39.0.0",
     "electron-builder": "26.0.12"
   },
-  "main": "electron/main.cjs",
-  "engines": {
-    "node": "22.x",
-    "npm": ">=10 <12"
-  },
-  "packageManager": "npm@10.9.2"
+  "main": "electron/main.cjs"
 }

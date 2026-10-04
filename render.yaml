@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: github-pusher-g3ac
+    name: github-project-pusher
     runtime: node
     plan: free
     buildCommand: npm install --no-audit --no-fund
@@ -54,11 +54,13 @@ services:
         sync: false
       - key: SUPABASE_STORAGE_BUCKET
         value: gpp-private
-      - key: PUBLIC_GITHUB_URL
-        sync: false
-      - key: PUBLIC_CONTACT_EMAIL
-        sync: false
       - key: GITHUB_CLIENT_ID
+        sync: false
+      - key: AUTH0_DOMAIN
+        sync: false
+      - key: AUTH0_CLIENT_ID
+        sync: false
+      - key: AUTH0_AUDIENCE
         sync: false
       - key: GITHUB_CLIENT_SECRET
         sync: false

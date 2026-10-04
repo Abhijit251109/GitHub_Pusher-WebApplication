@@ -7,8 +7,9 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import * as tar from 'tar';
+import tar from 'tar';
 import helmet from 'helmet';
+import { auth as createAuth0Verifier } from 'express-oauth2-jwt-bearer';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -24,8 +25,6 @@ const APPLICATION_PLATFORMS = {
 };
 const LOCAL_DATA = path.join(ROOT, 'data');
 const UPLOAD_TEMP = path.join(LOCAL_DATA, 'uploads');
-const FEEDBACK_DIR = path.join(ROOT, 'feedback');
-const CONTRIBUTE_DIR = path.join(ROOT, 'contribute');
 const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 2000);
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 50) * 1024 * 1024;
 const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 40) * 1024 * 1024;
@@ -49,6 +48,11 @@ const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_UR
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
 const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
+const AUTH0_DOMAIN = String(process.env.AUTH0_DOMAIN || '').trim().replace(/^https?:\/\//, '').replace(/\/$/, '');
+const AUTH0_CLIENT_ID = String(process.env.AUTH0_CLIENT_ID || '').trim();
+const AUTH0_AUDIENCE = String(process.env.AUTH0_AUDIENCE || '').trim();
+const hasAuth0 = Boolean(AUTH0_DOMAIN && AUTH0_CLIENT_ID && AUTH0_AUDIENCE);
+const auth0Verifier = hasAuth0 ? createAuth0Verifier({ issuerBaseURL: `https://${AUTH0_DOMAIN}`, audience: AUTH0_AUDIENCE, authRequired: false }) : null;
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
@@ -63,8 +67,6 @@ const supabase = hasSupabase
   : null;
 
 await fs.mkdir(UPLOAD_TEMP, { recursive: true });
-await fs.mkdir(FEEDBACK_DIR, { recursive: true });
-await fs.mkdir(CONTRIBUTE_DIR, { recursive: true });
 await fs.mkdir(APPLICATIONS, { recursive: true });
 await Promise.all(Object.keys(APPLICATION_PLATFORMS).map(platform => fs.mkdir(path.join(APPLICATIONS, platform), { recursive: true })));
 
@@ -93,16 +95,17 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
+      scriptSrc: ["'self'", 'https://cdn.auth0.com'],
       styleSrc: ["'self'"],
       imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'", ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
+      connectSrc: ["'self'", ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : []), ...(AUTH0_DOMAIN ? [`https://${AUTH0_DOMAIN}`] : [])],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
       formAction: ["'self'", 'https://github.com'],
       frameAncestors: ["'none'"],
-      workerSrc: ["'self'"]
+      workerSrc: ["'self'"],
+      frameSrc: ["'self'", ...(AUTH0_DOMAIN ? [`https://${AUTH0_DOMAIN}`] : [])]
     }
   },
   referrerPolicy: { policy: 'no-referrer' },
@@ -120,17 +123,6 @@ function supabaseRequired() {
 function nowIso() { return new Date().toISOString(); }
 function normalizeName(s) {
   return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'project';
-}
-async function moveFile(source, target) {
-  try {
-    await fs.rename(source, target);
-  } catch (error) {
-    if (error?.code !== 'EXDEV') throw error;
-    // Render can place the temporary upload directory and workspace on different
-    // filesystems. rename(2) cannot cross that boundary, so copy then remove.
-    await fs.copyFile(source, target);
-    await fs.rm(source, { force: true });
-  }
 }
 function safeRelative(rel) {
   const n = path.posix.normalize(String(rel || '').replaceAll('\\', '/'));
@@ -215,6 +207,7 @@ function getBearerToken(req) {
   return header.startsWith('Bearer ') ? header.slice(7).trim() : null;
 }
 function requestHasBearer(req) { return Boolean(getBearerToken(req)); }
+
 async function queryOne(table, builder) {
   supabaseRequired();
   const { data, error } = await builder;
@@ -225,8 +218,8 @@ async function queryOne(table, builder) {
 function userFromRow(row) {
   if (!row) return null;
   return {
-    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar,
-    githubTokenEnc: row.github_token_enc, githubRefreshTokenEnc: row.github_refresh_token_enc,
+    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar, email: row.email || null, auth0Sub: row.auth0_sub || null,
+    githubTokenEnc: row.github_token_enc || null, githubRefreshTokenEnc: row.github_refresh_token_enc,
     githubExpiresAt: row.github_expires_at ? new Date(row.github_expires_at).getTime() : null,
     githubRefreshExpiresAt: row.github_refresh_expires_at ? new Date(row.github_refresh_expires_at).getTime() : null
   };
@@ -254,7 +247,8 @@ function projectToRow(p) {
 async function dbUserUpsert(user) {
   const row = {
     id: String(user.id), login: user.login, name: user.name, avatar: user.avatar,
-    github_token_enc: user.githubTokenEnc, github_refresh_token_enc: user.githubRefreshTokenEnc || null,
+    email: user.email || null, auth0_sub: user.auth0Sub || null,
+    github_token_enc: user.githubTokenEnc || null, github_refresh_token_enc: user.githubRefreshTokenEnc || null,
     github_expires_at: user.githubExpiresAt ? new Date(user.githubExpiresAt).toISOString() : null,
     github_refresh_expires_at: user.githubRefreshExpiresAt ? new Date(user.githubRefreshExpiresAt).toISOString() : null,
     updated_at: nowIso()
@@ -307,9 +301,47 @@ async function deleteSession(token) {
   if (!token) return;
   await queryOne('sessions', supabase.from('sessions').delete().eq('id', hashSecret(token)));
 }
+
+function auth0StableUserId(sub) {
+  return `auth0:${crypto.createHash('sha256').update(String(sub)).digest('hex')}`;
+}
+async function auth0UserFromRequest(req, res) {
+  if (!auth0Verifier || !requestHasBearer(req)) return null;
+  let result = null;
+  await new Promise(resolve => {
+    auth0Verifier(req, res, err => { result = err ? null : req.auth || null; resolve(); });
+  });
+  if (!result?.payload?.sub) return null;
+  const payload = result.payload;
+  const id = auth0StableUserId(payload.sub);
+  let user = await dbGetUser(id);
+  if (!user) {
+    user = {
+      id,
+      login: payload.email || payload.nickname || String(payload.sub).split('|').pop() || 'auth0-user',
+      name: payload.name || payload.email || 'Auth0 user',
+      avatar: payload.picture || null,
+      email: payload.email || null,
+      auth0Sub: payload.sub,
+      githubTokenEnc: null, githubRefreshTokenEnc: null, githubExpiresAt: null, githubRefreshExpiresAt: null
+    };
+    await dbUserUpsert(user);
+  } else {
+    const patch = { ...user, auth0Sub: payload.sub, email: payload.email || user.email || null, name: payload.name || user.name, avatar: payload.picture || user.avatar };
+    if (payload.email && (!user.login || user.login.startsWith('auth0:'))) patch.login = payload.email;
+    user = await dbUserUpsert(patch);
+  }
+  return user;
+}
+
 async function getSession(req, res, { createAnonymous = false } = {}) {
   const bearer = getBearerToken(req);
-  if (bearer) return sessionFromToken(bearer);
+  if (bearer) {
+    const localSession = await sessionFromToken(bearer);
+    if (localSession) return localSession;
+    const auth0User = await auth0UserFromRequest(req, res);
+    if (auth0User) return { sid: null, token: bearer, user: auth0User, provider: 'auth0' };
+  }
   const cookie = parseCookies(req)[SESSION_COOKIE];
   if (cookie) {
     const session = await sessionFromToken(cookie);
@@ -324,15 +356,16 @@ async function getSession(req, res, { createAnonymous = false } = {}) {
 async function authUser(req, res, required = true) {
   const session = await getSession(req, res);
   if (!session?.user) {
-    if (required) res.status(401).json({ error: 'Please sign in with GitHub.' });
+    if (required) res.status(401).json({ error: 'Please sign in with Auth0.' });
     return null;
   }
   return { ...session, user: session.user };
 }
 
-async function createOAuthAttempt(state, codeVerifier, returnTo, browserBinding) {
+async function createOAuthAttempt(state, codeVerifier, returnTo, browserBinding, userId = null) {
   await queryOne('oauth_attempts', supabase.from('oauth_attempts').insert({
     state_hash: hashSecret(state), code_verifier: codeVerifier, return_to: returnTo,
+    user_id: userId ? String(userId) : null,
     client_cookie_hash: hashSecret(browserBinding),
     created_at: nowIso(), expires_at: new Date(Date.now() + OAUTH_ATTEMPT_TTL_MS).toISOString()
   }));
@@ -366,12 +399,8 @@ async function consumeSseTicket(ticket) {
   if (!ticket) return null;
   const row = await queryOne('sse_tickets', supabase.from('sse_tickets').select('*').eq('ticket_hash', hashSecret(ticket)).maybeSingle());
   if (!row) return null;
-  if (new Date(row.expires_at).getTime() < Date.now()) {
-    await queryOne('sse_tickets', supabase.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
-    return null;
-  }
-  // EventSource automatically reconnects using the same URL. Keep the short-lived
-  // ticket reusable until expiry so reconnects do not become permanently 401.
+  await queryOne('sse_tickets', supabase.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
+  if (new Date(row.expires_at).getTime() < Date.now()) return null;
   const user = await dbGetUser(row.user_id);
   return user ? { user } : null;
 }
@@ -537,7 +566,7 @@ async function githubFetch(url, options = {}) {
   return data;
 }
 async function userToken(user) {
-  if (!user.githubTokenEnc) return null;
+  if (!user?.githubTokenEnc) throw new Error('Connect your GitHub account before using GitHub project features.');
   if (user.githubExpiresAt && user.githubExpiresAt - Date.now() < 60_000 && user.githubRefreshTokenEnc) {
     const refresh = decrypt(user.githubRefreshTokenEnc);
     const response = await fetch('https://github.com/login/oauth/access_token', {
@@ -654,8 +683,15 @@ app.get('/api/auth/me', async (req, res) => {
   try {
     const a = await authUser(req, res, false);
     if (!a) return res.json({ authenticated: false });
-    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
+    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar, email: a.user.email, githubConnected: Boolean(a.user.githubTokenEnc) } });
   } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+app.get('/api/auth0/config', (req, res) => {
+  const origin = req.get('Origin');
+  if (origin && !allowedOrigin(origin)) return res.status(403).json({ error: 'Origin not allowed.' });
+  if (!hasAuth0) return res.status(503).json({ enabled: false, error: 'Auth0 is not configured on this server.' });
+  res.setHeader('Cache-Control', 'no-store');
+  return res.json({ enabled: true, domain: AUTH0_DOMAIN, clientId: AUTH0_CLIENT_ID, audience: AUTH0_AUDIENCE });
 });
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
 app.get('/api/auth/login', async (req, res) => {
@@ -682,6 +718,32 @@ app.get('/api/auth/login', async (req, res) => {
     res.redirect(u.toString());
   } catch (e) { res.status(500).send(`GitHub sign-in setup failed: ${e.message}`); }
 });
+app.post('/api/github/connect', ensureRequestProtection, async (req, res) => {
+  try {
+    const a = await authUser(req, res); if (!a) return;
+    if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).json({ error: 'GitHub OAuth is not configured on this server.' });
+    supabaseRequired();
+    const returnTo = allowedReturnTo(req.body?.return_to || `${FRONTEND_URL || publicBaseUrl(req)}/index.html`, req);
+    if (!returnTo) return res.status(400).json({ error: 'Invalid return URL.' });
+    const state = randomToken(24);
+    const codeVerifier = randomToken(32);
+    const browserBinding = randomToken(24);
+    const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
+    await createOAuthAttempt(state, codeVerifier, returnTo, browserBinding, a.user.id);
+    res.setHeader('Set-Cookie', `${OAUTH_BINDING_COOKIE}=${browserBinding}; ${oauthBindingCookieOptions()}`);
+    const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
+    const u = new URL('https://github.com/login/oauth/authorize');
+    u.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
+    u.searchParams.set('redirect_uri', redirectUri);
+    u.searchParams.set('scope', GITHUB_SCOPE);
+    u.searchParams.set('state', state);
+    u.searchParams.set('code_challenge', challenge);
+    u.searchParams.set('code_challenge_method', 'S256');
+    u.searchParams.set('allow_signup', process.env.GITHUB_ALLOW_SIGNUP === 'false' ? 'false' : 'true');
+    return res.json({ url: u.toString() });
+  } catch (e) { return res.status(500).json({ error: e.message }); }
+});
+
 app.get('/auth/github/callback', async (req, res) => {
   try {
     supabaseRequired();
@@ -702,12 +764,25 @@ app.get('/auth/github/callback', async (req, res) => {
     const ghUser = await githubFetch('https://api.github.com/user', { headers: githubHeaders(tokenData.access_token) });
     const userId = String(ghUser.id);
     if (REQUIRE_GITHUB_ALLOWLIST && !ALLOWED_GITHUB_USER_IDS.has(userId)) return res.status(403).send('This GitHub account is not authorized to use this application.');
-    const user = {
-      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url,
+    const githubFields = {
       githubTokenEnc: encrypt(tokenData.access_token),
       githubRefreshTokenEnc: tokenData.refresh_token ? encrypt(tokenData.refresh_token) : null,
       githubExpiresAt: tokenData.expires_in ? Date.now() + Number(tokenData.expires_in) * 1000 : null,
       githubRefreshExpiresAt: tokenData.refresh_token_expires_in ? Date.now() + Number(tokenData.refresh_token_expires_in) * 1000 : null
+    };
+    if (attempt.user_id) {
+      const existing = await dbGetUser(attempt.user_id);
+      if (!existing) return res.status(404).send('The authenticated application user no longer exists.');
+      const merged = { ...existing, login: existing.login || ghUser.login, name: existing.name || ghUser.name || ghUser.login, avatar: existing.avatar || ghUser.avatar_url, ...githubFields };
+      await dbUserUpsert(merged);
+      const target = new URL(attempt.return_to || FRONTEND_URL || publicBaseUrl(req));
+      target.searchParams.set('github', 'connected');
+      res.setHeader('Set-Cookie', clearOAuthBindingCookie());
+      return res.redirect(target.toString());
+    }
+    const user = {
+      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url, email: null, auth0Sub: null,
+      ...githubFields
     };
     await dbUserUpsert(user);
     if (attempt.return_to) {
@@ -737,85 +812,11 @@ app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
   try {
     const bearer = getBearerToken(req);
     const cookie = parseCookies(req)[SESSION_COOKIE];
-    await deleteSession(bearer || cookie);
+    if (bearer && !bearer.includes('.')) await deleteSession(bearer);
+    if (cookie) await deleteSession(cookie);
     if (cookie) res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; ${cookieOptions()}; Max-Age=0`);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
-});
-
-function cleanSubmissionText(value, max = 4000) {
-  return String(value ?? '').replace(/\u0000/g, '').replace(/\r/g, '').trim().slice(0, max);
-}
-function submissionFileStem() {
-  return `${new Date().toISOString().replace(/[:.]/g, '-')}-${crypto.randomUUID()}`;
-}
-async function saveSubmission(kind, extension, content, contentType) {
-  const dir = kind === 'feedback' ? FEEDBACK_DIR : CONTRIBUTE_DIR;
-  const filename = `${submissionFileStem()}${extension}`;
-  const fullPath = path.join(dir, filename);
-  await fs.writeFile(fullPath, content, 'utf8');
-  if (supabase) {
-    try {
-      await storageUpload(`${kind}/${filename}`, Buffer.from(content, 'utf8'), contentType);
-    } catch (error) {
-      await fs.rm(fullPath, { force: true }).catch(() => {});
-      throw error;
-    }
-  }
-  return { filename, path: path.relative(ROOT, fullPath).replaceAll(path.sep, '/') };
-}
-async function optionalAuthenticatedUser(req) {
-  try { return (await getSession(req, { setHeader() {} }, {}))?.user || null; } catch { return null; }
-}
-app.get('/api/public/contact', (_req, res) => {
-  res.json({
-    githubUrl: String(process.env.PUBLIC_GITHUB_URL || '').trim(),
-    email: String(process.env.PUBLIC_CONTACT_EMAIL || '').trim()
-  });
-});
-app.post('/api/feedback', ensureRequestProtection, async (req, res) => {
-  try {
-    const body = req.body || {};
-    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true });
-    const user = await optionalAuthenticatedUser(req);
-    const message = cleanSubmissionText(body.message, 8000);
-    if (!message) return res.status(400).json({ error: 'Please enter your feedback.' });
-    const name = cleanSubmissionText(body.name, 120) || user?.name || user?.login || 'Anonymous';
-    const email = cleanSubmissionText(body.email, 254) || user?.email || '';
-    const github = cleanSubmissionText(body.github, 120) || user?.login || '';
-    const text = [
-      'GitHub Project Pusher — Feedback',
-      `Submitted: ${nowIso()}`,
-      `Name: ${name}`,
-      `Email: ${email || '(not provided)'}`,
-      `GitHub: ${github || '(not provided)'}`,
-      '',
-      message,
-      ''
-    ].join('\\n');
-    const saved = await saveSubmission('feedback', '.txt', text, 'text/plain');
-    res.json({ ok: true, filename: saved.filename });
-  } catch (e) { res.status(500).json({ error: e.message || 'Could not save feedback.' }); }
-});
-app.post('/api/contribute', ensureRequestProtection, async (req, res) => {
-  try {
-    const body = req.body || {};
-    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true });
-    const user = await optionalAuthenticatedUser(req);
-    const contribution = {
-      submittedAt: nowIso(),
-      name: cleanSubmissionText(body.name, 120) || user?.name || user?.login || 'Anonymous',
-      email: cleanSubmissionText(body.email, 254) || user?.email || '',
-      github: cleanSubmissionText(body.github, 120) || user?.login || '',
-      type: cleanSubmissionText(body.type, 60) || 'code',
-      title: cleanSubmissionText(body.title, 200),
-      link: cleanSubmissionText(body.link, 1000),
-      description: cleanSubmissionText(body.description, 8000)
-    };
-    if (!contribution.title || !contribution.description) return res.status(400).json({ error: 'Please provide a contribution title and description.' });
-    const saved = await saveSubmission('contribute', '.json', JSON.stringify(contribution, null, 2) + '\n', 'application/json');
-    res.json({ ok: true, filename: saved.filename });
-  } catch (e) { res.status(500).json({ error: e.message || 'Could not save contribution.' }); }
 });
 
 app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { res.status(500).json({ error: e.message }); } });
@@ -875,7 +876,7 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       const target = path.join(workspace, rel);
       if (!target.startsWith(workspace + path.sep)) continue;
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await moveFile(file.path, target);
+      await fs.rename(file.path, target);
     }
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
