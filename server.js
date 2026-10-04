@@ -7,7 +7,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import tar from 'tar';
+import * as tar from 'tar';
 import helmet from 'helmet';
 import { auth as createAuth0Verifier } from 'express-oauth2-jwt-bearer';
 
