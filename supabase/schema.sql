@@ -7,7 +7,6 @@ create table if not exists public.users (
   login text not null,
   name text,
   avatar text,
-  email text,
   github_token_enc text not null,
   github_refresh_token_enc text,
   github_expires_at timestamptz,
@@ -34,7 +33,6 @@ create table if not exists public.oauth_attempts (
 );
 create index if not exists oauth_attempts_expires_at_idx on public.oauth_attempts(expires_at);
 alter table public.oauth_attempts add column if not exists client_cookie_hash text;
-alter table public.users add column if not exists email text;
 
 create table if not exists public.login_codes (
   code_hash text primary key,

@@ -7,7 +7,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import * as tar from 'tar';
+import tar from 'tar';
 import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
@@ -16,8 +16,6 @@ const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = process.cwd();
 const APPLICATIONS = path.join(ROOT, 'application');
-const FEEDBACK_DIR = path.join(ROOT, 'feedback');
-const CONTRIBUTE_DIR = path.join(ROOT, 'contribute');
 const APPLICATION_PLATFORMS = {
   windows: ['.msi', '.exe'],
   macos: ['.dmg', '.pkg', '.zip'],
@@ -26,6 +24,8 @@ const APPLICATION_PLATFORMS = {
 };
 const LOCAL_DATA = path.join(ROOT, 'data');
 const UPLOAD_TEMP = path.join(LOCAL_DATA, 'uploads');
+const FEEDBACK_DIR = path.join(ROOT, 'feedback');
+const CONTRIBUTE_DIR = path.join(ROOT, 'contribute');
 const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 2000);
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 50) * 1024 * 1024;
 const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 40) * 1024 * 1024;
@@ -48,7 +48,7 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
-const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo user:email offline_access';
+const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
@@ -63,9 +63,9 @@ const supabase = hasSupabase
   : null;
 
 await fs.mkdir(UPLOAD_TEMP, { recursive: true });
-await fs.mkdir(APPLICATIONS, { recursive: true });
 await fs.mkdir(FEEDBACK_DIR, { recursive: true });
 await fs.mkdir(CONTRIBUTE_DIR, { recursive: true });
+await fs.mkdir(APPLICATIONS, { recursive: true });
 await Promise.all(Object.keys(APPLICATION_PLATFORMS).map(platform => fs.mkdir(path.join(APPLICATIONS, platform), { recursive: true })));
 
 const upload = multer({
@@ -120,6 +120,17 @@ function supabaseRequired() {
 function nowIso() { return new Date().toISOString(); }
 function normalizeName(s) {
   return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'project';
+}
+async function moveFile(source, target) {
+  try {
+    await fs.rename(source, target);
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error;
+    // Render can place the temporary upload directory and workspace on different
+    // filesystems. rename(2) cannot cross that boundary, so copy then remove.
+    await fs.copyFile(source, target);
+    await fs.rm(source, { force: true });
+  }
 }
 function safeRelative(rel) {
   const n = path.posix.normalize(String(rel || '').replaceAll('\\', '/'));
@@ -204,7 +215,6 @@ function getBearerToken(req) {
   return header.startsWith('Bearer ') ? header.slice(7).trim() : null;
 }
 function requestHasBearer(req) { return Boolean(getBearerToken(req)); }
-
 async function queryOne(table, builder) {
   supabaseRequired();
   const { data, error } = await builder;
@@ -215,7 +225,7 @@ async function queryOne(table, builder) {
 function userFromRow(row) {
   if (!row) return null;
   return {
-    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar, email: row.email || null,
+    id: String(row.id), login: row.login, name: row.name, avatar: row.avatar,
     githubTokenEnc: row.github_token_enc, githubRefreshTokenEnc: row.github_refresh_token_enc,
     githubExpiresAt: row.github_expires_at ? new Date(row.github_expires_at).getTime() : null,
     githubRefreshExpiresAt: row.github_refresh_expires_at ? new Date(row.github_refresh_expires_at).getTime() : null
@@ -244,21 +254,12 @@ function projectToRow(p) {
 async function dbUserUpsert(user) {
   const row = {
     id: String(user.id), login: user.login, name: user.name, avatar: user.avatar,
-    email: user.email || null,
     github_token_enc: user.githubTokenEnc, github_refresh_token_enc: user.githubRefreshTokenEnc || null,
     github_expires_at: user.githubExpiresAt ? new Date(user.githubExpiresAt).toISOString() : null,
     github_refresh_expires_at: user.githubRefreshExpiresAt ? new Date(user.githubRefreshExpiresAt).toISOString() : null,
     updated_at: nowIso()
   };
-  try {
-    await queryOne('users', supabase.from('users').upsert(row, { onConflict: 'id' }));
-  } catch (error) {
-    // Keep existing deployments usable until the one-line users.email migration has been run.
-    if (!/email|column/i.test(String(error.message || ''))) throw error;
-    const legacy = { ...row };
-    delete legacy.email;
-    await queryOne('users', supabase.from('users').upsert(legacy, { onConflict: 'id' }));
-  }
+  await queryOne('users', supabase.from('users').upsert(row, { onConflict: 'id' }));
   return user;
 }
 async function dbGetUser(userId) {
@@ -365,8 +366,12 @@ async function consumeSseTicket(ticket) {
   if (!ticket) return null;
   const row = await queryOne('sse_tickets', supabase.from('sse_tickets').select('*').eq('ticket_hash', hashSecret(ticket)).maybeSingle());
   if (!row) return null;
-  await queryOne('sse_tickets', supabase.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
-  if (new Date(row.expires_at).getTime() < Date.now()) return null;
+  if (new Date(row.expires_at).getTime() < Date.now()) {
+    await queryOne('sse_tickets', supabase.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
+    return null;
+  }
+  // EventSource automatically reconnects using the same URL. Keep the short-lived
+  // ticket reusable until expiry so reconnects do not become permanently 401.
   const user = await dbGetUser(row.user_id);
   return user ? { user } : null;
 }
@@ -531,17 +536,6 @@ async function githubFetch(url, options = {}) {
   if (!r.ok) throw new Error((data && data.message) || `GitHub API error ${r.status}`);
   return data;
 }
-async function githubPrimaryEmail(token, profileEmail = null) {
-  try {
-    const emails = await githubFetch('https://api.github.com/user/emails', { headers: githubHeaders(token) });
-    if (Array.isArray(emails)) {
-      const primary = emails.find(item => item.primary && item.verified) || emails.find(item => item.verified) || emails.find(item => item.primary);
-      if (primary?.email) return String(primary.email).trim();
-    }
-  } catch {}
-  return profileEmail ? String(profileEmail).trim() : null;
-}
-
 async function userToken(user) {
   if (!user.githubTokenEnc) return null;
   if (user.githubExpiresAt && user.githubExpiresAt - Date.now() < 60_000 && user.githubRefreshTokenEnc) {
@@ -598,21 +592,9 @@ async function ensureGit(dir, cloneUrl) {
 function askpassScript() { return path.join(os.tmpdir(), `gpp-askpass-${crypto.randomUUID()}.cjs`); }
 async function withGitAuth(token, fn) {
   const file = askpassScript();
-  const script = [
-    '#!/usr/bin/env node',
-    "const prompt=process.argv.slice(2).join(' ');",
-    "process.stdout.write(/username|login/i.test(prompt) ? 'x-access-token' : (process.env.GH_TOKEN || ''));",
-    ''
-  ].join('\n');
-  await fs.writeFile(file, script, { mode: 0o700 });
-  try {
-    return await fn({
-      GIT_ASKPASS: file,
-      GIT_ASKPASS_REQUIRE: 'force',
-      GH_TOKEN: token,
-      GIT_TERMINAL_PROMPT: '0'
-    });
-  } finally { await fs.rm(file, { force: true }); }
+  await fs.writeFile(file, `const p=process.argv.slice(2).join(' ');process.stdout.write(/username/i.test(p)?'x-access-token':(process.env.GH_TOKEN||''));\n`);
+  try { await fs.chmod(file, 0o700); return await fn({ GIT_ASKPASS: file, GH_TOKEN: token, GIT_TERMINAL_PROMPT: '0' }); }
+  finally { await fs.rm(file, { force: true }); }
 }
 async function runGit(cwd, args, env = {}) {
   return execFileAsync('git', args, {
@@ -672,7 +654,7 @@ app.get('/api/auth/me', async (req, res) => {
   try {
     const a = await authUser(req, res, false);
     if (!a) return res.json({ authenticated: false });
-    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar, email: a.user.email || null } });
+    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
@@ -718,11 +700,10 @@ app.get('/auth/github/callback', async (req, res) => {
     const tokenData = await tokenResponse.json();
     if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) throw new Error(tokenData.error_description || 'OAuth exchange failed.');
     const ghUser = await githubFetch('https://api.github.com/user', { headers: githubHeaders(tokenData.access_token) });
-    const email = await githubPrimaryEmail(tokenData.access_token, ghUser.email);
     const userId = String(ghUser.id);
     if (REQUIRE_GITHUB_ALLOWLIST && !ALLOWED_GITHUB_USER_IDS.has(userId)) return res.status(403).send('This GitHub account is not authorized to use this application.');
     const user = {
-      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url, email,
+      id: userId, login: ghUser.login, name: ghUser.name || ghUser.login, avatar: ghUser.avatar_url,
       githubTokenEnc: encrypt(tokenData.access_token),
       githubRefreshTokenEnc: tokenData.refresh_token ? encrypt(tokenData.refresh_token) : null,
       githubExpiresAt: tokenData.expires_in ? Date.now() + Number(tokenData.expires_in) * 1000 : null,
@@ -749,7 +730,7 @@ app.post('/api/auth/exchange', ensureRequestProtection, async (req, res) => {
     if (!row) return res.status(401).json({ error: 'Login code is invalid or expired.' });
     const token = await createSession(row.user_id);
     const user = await dbGetUser(row.user_id);
-    return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar, email: user.email || null } });
+    return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar } });
   } catch (e) { return res.status(500).json({ error: e.message }); }
 });
 app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
@@ -774,7 +755,12 @@ async function saveSubmission(kind, extension, content, contentType) {
   const fullPath = path.join(dir, filename);
   await fs.writeFile(fullPath, content, 'utf8');
   if (supabase) {
-    await storageUpload(`${kind}/${filename}`, Buffer.from(content, 'utf8'), contentType).catch(() => {});
+    try {
+      await storageUpload(`${kind}/${filename}`, Buffer.from(content, 'utf8'), contentType);
+    } catch (error) {
+      await fs.rm(fullPath, { force: true }).catch(() => {});
+      throw error;
+    }
   }
   return { filename, path: path.relative(ROOT, fullPath).replaceAll(path.sep, '/') };
 }
@@ -790,7 +776,7 @@ app.get('/api/public/contact', (_req, res) => {
 app.post('/api/feedback', ensureRequestProtection, async (req, res) => {
   try {
     const body = req.body || {};
-    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true }); // honeypot
+    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true });
     const user = await optionalAuthenticatedUser(req);
     const message = cleanSubmissionText(body.message, 8000);
     if (!message) return res.status(400).json({ error: 'Please enter your feedback.' });
@@ -806,7 +792,7 @@ app.post('/api/feedback', ensureRequestProtection, async (req, res) => {
       '',
       message,
       ''
-    ].join('\n');
+    ].join('\\n');
     const saved = await saveSubmission('feedback', '.txt', text, 'text/plain');
     res.json({ ok: true, filename: saved.filename });
   } catch (e) { res.status(500).json({ error: e.message || 'Could not save feedback.' }); }
@@ -814,7 +800,7 @@ app.post('/api/feedback', ensureRequestProtection, async (req, res) => {
 app.post('/api/contribute', ensureRequestProtection, async (req, res) => {
   try {
     const body = req.body || {};
-    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true }); // honeypot
+    if (cleanSubmissionText(body.website, 200)) return res.json({ ok: true });
     const user = await optionalAuthenticatedUser(req);
     const contribution = {
       submittedAt: nowIso(),
@@ -889,7 +875,7 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       const target = path.join(workspace, rel);
       if (!target.startsWith(workspace + path.sep)) continue;
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.rename(file.path, target);
+      await moveFile(file.path, target);
     }
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
@@ -943,22 +929,6 @@ app.get('/api/github/repos', async (req, res) => {
     res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
-async function remoteHistoryState(dir, branch) {
-  const remoteRef = await rev(dir, `origin/${branch}`);
-  const head = await rev(dir, 'HEAD');
-  if (!remoteRef) return { remoteRef: null, head, common: true, remoteAhead: false };
-  if (!head) return { remoteRef, head: null, common: false, remoteAhead: true };
-  try {
-    await runGit(dir, ['merge-base', '--is-ancestor', remoteRef, head]);
-    return { remoteRef, head, common: true, remoteAhead: false };
-  } catch {}
-  try {
-    await runGit(dir, ['merge-base', '--is-ancestor', head, remoteRef]);
-    return { remoteRef, head, common: true, remoteAhead: true };
-  } catch {}
-  return { remoteRef, head, common: false, remoteAhead: false };
-}
-
 app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   const { projectId, repoId, repoName, visibility = 'private', branch = 'main' } = req.body || {};
@@ -978,19 +948,13 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         const dirty = await statusPorcelain(dir);
         await withGitAuth(token, async env => {
           await runGit(dir, ['fetch', 'origin'], env).catch(() => {});
-          const remoteBranch = branch;
-          const history = await remoteHistoryState(dir, remoteBranch);
-          if (history.remoteRef && !history.head) {
-            throw new Error(`Repository ${repo.full_name} already has commits on ${remoteBranch}. Use a fresh repository or pull/merge it first; the app will not overwrite existing history.`);
+          const remoteBranch = repo.default_branch || branch;
+          if (!dirty) {
+            const remoteRef = await rev(dir, `origin/${remoteBranch}`);
+            const head = await rev(dir, 'HEAD');
+            if (remoteRef && !head) throw new Error('Selected repository already has history. Use a fresh repository or pull/merge it first.');
           }
-          if (history.remoteRef && !history.common) {
-            throw new Error(`Repository ${repo.full_name} has unrelated Git history. Merge the histories manually (or choose an empty repository) before pushing; the app will not force-push.`);
-          }
-          if (dirty) {
-            await runGit(dir, ['add', '-A'], env);
-          } else {
-            await runGit(dir, ['add', '-A'], env);
-          }
+          await runGit(dir, ['add', '-A'], env);
           let changes = true;
           try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
           if (changes) await runGit(dir, ['commit', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);

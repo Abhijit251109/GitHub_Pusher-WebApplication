@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: github-project-pusher
+    name: github-pusher-g3ac
     runtime: node
     plan: free
     buildCommand: npm install --no-audit --no-fund
@@ -10,8 +10,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      - key: NODE_VERSION
-        value: "20.20.2"
       - key: HOST
         value: 0.0.0.0
       - key: PORT
@@ -40,10 +38,6 @@ services:
         value: "10"
       - key: APP_NAME
         value: GitHub Project Pusher
-      - key: PUBLIC_GITHUB_URL
-        sync: false
-      - key: PUBLIC_CONTACT_EMAIL
-        sync: false
       - key: PUBLIC_BASE_URL
         sync: false
       - key: FRONTEND_URL
@@ -60,6 +54,10 @@ services:
         sync: false
       - key: SUPABASE_STORAGE_BUCKET
         value: gpp-private
+      - key: PUBLIC_GITHUB_URL
+        sync: false
+      - key: PUBLIC_CONTACT_EMAIL
+        sync: false
       - key: GITHUB_CLIENT_ID
         sync: false
       - key: GITHUB_CLIENT_SECRET
@@ -67,7 +65,7 @@ services:
       - key: GITHUB_CALLBACK_URL
         sync: false
       - key: GITHUB_OAUTH_SCOPE
-        value: repo user:email offline_access
+        value: repo offline_access
       - key: GITHUB_ALLOW_SIGNUP
         value: "true"
       - key: REQUIRE_GITHUB_ALLOWLIST

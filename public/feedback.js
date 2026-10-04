@@ -9,7 +9,6 @@
   const apiUrl = path => new URL(path.replace(/^\/+/, ''), API_ORIGIN.replace(/\/+$/, '') + '/').toString();
   const token = () => sessionStorage.getItem('gpp_access_token') || '';
   const $ = id => document.getElementById(id);
-  const escapeHtml = value => String(value ?? '').replace(/[&<>'"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]));
 
   async function loadContact() {
     try {
@@ -30,9 +29,7 @@
         el.textContent = email;
         if (el.tagName === 'A') el.href = `mailto:${email}`;
       });
-      document.querySelectorAll('[data-contact-empty]').forEach(el => {
-        el.hidden = Boolean(github || email);
-      });
+      document.querySelectorAll('[data-contact-empty]').forEach(el => { el.hidden = Boolean(github || email); });
     } catch {}
   }
 

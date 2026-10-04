@@ -1,6 +1,6 @@
 # Deployment checklist
 
-This version is designed for **GitHub Pages + Render Free + Supabase Free**. GitHub Pages serves the static frontend, Render runs the Node/Express backend, and Supabase stores the durable database and private project/snapshot archives.
+This version is designed for **GitHub Pages + Render Free + Supabase Free**. GitHub Pages serves the static frontend, Render runs the Node 22/Express backend, and Supabase stores the durable database and private project/snapshot archives.
 
 ## 1. Supabase
 
@@ -19,7 +19,7 @@ Health: /api/health
 Set the variables in `.env.example`, including:
 
 ```env
-PUBLIC_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com
+PUBLIC_BASE_URL=https://github-pusher-g3ac.onrender.com
 FRONTEND_URL=https://USERNAME.github.io/REPOSITORY
 SUPABASE_URL=https://YOUR-PROJECT.supabase.co
 SUPABASE_SERVICE_ROLE_KEY=...
@@ -32,7 +32,7 @@ Render Free's filesystem is ephemeral, so do not store application data under `/
 In the GitHub OAuth App, use:
 
 - Homepage URL: your GitHub Pages URL
-- Authorization callback URL: `https://YOUR-RENDER-SERVICE.onrender.com/auth/github/callback`
+- Authorization callback URL: `https://github-pusher-g3ac.onrender.com/auth/github/callback`
 
 The backend uses `state` and PKCE S256 for the OAuth web flow.
 
@@ -77,11 +77,3 @@ Supabase project URL configured for this build:
 `https://vsrooptemnxxqolzbeze.supabase.co`
 
 The Supabase publishable key is safe for the browser bundle; the Supabase secret key remains backend-only in `.env`/Render environment variables.
-
-## Runtime pin
-
-This repository pins Node 20.20.2 to prevent Render from selecting its newer Node 24 default. Node 20 is EOL upstream, so upgrade the runtime deliberately rather than letting the hosting default change it unexpectedly.
-
-## Feedback and contribution storage
-
-User feedback is stored as `.txt` files under `./feedback` and contribution proposals as `.json` files under `./contribute`. The backend also mirrors these submissions to the private Supabase Storage bucket when persistence is configured.

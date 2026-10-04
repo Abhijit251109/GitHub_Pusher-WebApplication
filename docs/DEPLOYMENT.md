@@ -20,8 +20,8 @@ Render currently offers free Node web services, but their filesystem is ephemera
 3. Render can use `render.yaml`, or you can enter the equivalent settings manually.
 4. Choose the **Free** plan.
 5. Set the secrets/environment values from `.env.example` and `render.yaml`.
-6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-project-pusher.onrender.com`.
-7. Set `GITHUB_CALLBACK_URL` to `https://github-project-pusher.onrender.com/auth/github/callback`.
+6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-pusher-g3ac.onrender.com`.
+7. Set `GITHUB_CALLBACK_URL` to `https://github-pusher-g3ac.onrender.com/auth/github/callback`.
 8. Set `FRONTEND_URL` to your GitHub Pages URL, such as `https://USERNAME.github.io/REPOSITORY`.
 
 ### Required secrets
@@ -75,12 +75,6 @@ window.GPP_CONFIG = { API_BASE: 'https://YOUR-RENDER-SERVICE.onrender.com' };
 ```
 
 The frontend never receives the GitHub OAuth client secret or the Supabase service-role key. The distributable ZIP also excludes `.env`; configure backend secrets in Render instead.
-
-### Node version
-Render currently defaults newer services to Node 24. The repository pins Node 20.20.2 with both `.node-version` and `NODE_VERSION` in `render.yaml`, so the deployment does not silently switch majors. Node 20 is now EOL upstream, so treat this pin as compatibility-only and plan a later runtime upgrade when the project is ready.
-
-### Feedback and contributions
-Feedback is written as `./feedback/*.txt`; contribution proposals are written as `./contribute/*.json`. Because Render Free storage is ephemeral, the same files are mirrored into the private Supabase Storage bucket when Supabase is configured.
 
 ## 6. What is persistent now?
 

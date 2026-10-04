@@ -29,4 +29,4 @@ cd android
 
 For a release AAB/APK, configure signing in Android Studio or Gradle and use the release build task.
 
-Capacitor writes the buildable Android project to the standard root `android/` directory. The hosted HTTPS URL is configured through `GPP_APP_URL`; HTTP is only enabled when that variable explicitly uses `http://`.
+Capacitor writes the buildable Android project to the standard root `android/` directory. The hosted HTTPS URL defaults to the production Render service. Set `GPP_APP_URL` to override it for local or custom deployments; HTTP is only enabled when that variable explicitly uses `http://`.

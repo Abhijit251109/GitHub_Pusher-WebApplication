@@ -10,15 +10,6 @@ release/
 .DS_Store
 
 # Backend secrets / local environment
-.env
-.env.*
-!.env.example
 *.env.local
 *.env.production
 *.env.backup
-
-# Runtime-generated submissions and local state
-feedback/*.txt
-contribute/*.json
-data/*
-!data/.gitignore

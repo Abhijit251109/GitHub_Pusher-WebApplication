@@ -9,29 +9,19 @@
   <link rel="icon" href="icons/icon.svg" />
   <link rel="stylesheet" href="styles.css" />
   <title>GitHub Project Pusher</title>
-  <script src="theme.js"></script>
 </head>
 <body>
   <header class="topbar">
     <div><div class="brand">GitHub Project Pusher</div><div class="sub">Project library · GitHub sync · installable app</div></div>
-    <div class="top-actions">
-      <a class="ghost top-link" data-contact-github target="_blank" rel="noreferrer" hidden></a>
-      <a class="ghost top-link" data-contact-email hidden></a>
-      <button class="ghost" data-open-feedback>Feedback</button>
-      <button class="ghost" data-open-contribute>Contribute</button>
-      <label class="theme-control">Theme<select data-theme-select aria-label="Theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
-      <button id="installBtn" class="ghost" hidden>Install App</button>
-      <div id="userBox"></div>
-    </div>
+    <nav class="top-nav" aria-label="Project navigation">
+      <button id="feedbackBtn" data-open-feedback class="ghost" type="button">Feedback</button>
+      <button id="contributeBtn" data-open-contribute class="ghost" type="button">Contribute</button>
+      <label class="theme-control">Theme<select id="themeSelect" data-theme-select aria-label="Theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
+    </nav>
+    <div class="top-actions"><a class="ghost top-link" data-contact-github target="_blank" rel="noreferrer" hidden></a><a class="ghost top-link" data-contact-email hidden></a><button id="installBtn" class="ghost" hidden>Install App</button><div id="userBox"></div></div>
   </header>
   <main class="container">
-    <section id="authView" class="card auth" hidden>
-      <div class="orb">⇄</div><h1>Your projects, always with you.</h1>
-      <p>Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p>
-      <a class="primary big" id="loginLink" href="login.html">Continue with GitHub</a>
-      <p class="contact-line"><strong>Contact</strong> · <a data-contact-github target="_blank" rel="noreferrer" hidden></a> <a data-contact-email hidden></a><span data-contact-empty>No public contact configured.</span></p>
-      <small>GitHub permissions are requested through GitHub's authorization screen. Your token stays server-side.</small>
-    </section>
+    <section id="authView" class="card auth" hidden><div class="orb">⇄</div><h1>Your projects, always with you.</h1><p>Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p><a class="primary big" id="loginLink" href="login.html">Continue with GitHub</a><small>GitHub permissions are requested through GitHub's authorization screen. Your token stays server-side.</small></section>
     <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Available builds are detected automatically from the application folder.</p></div></div><div id="downloadList" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
     <section id="appView" hidden>
       <div class="toolbar card"><div class="toolbar-left"><button id="addBtn" class="primary">＋ Add Project</button><button id="pushBtn" class="secondary" disabled>↥ Push Selected</button><button id="removeBtn" class="danger" disabled>Remove</button></div><div class="toolbar-right"><span id="liveDot" class="dot"></span><span id="liveText">Connecting…</span><button id="refreshBtn" class="ghost">Refresh</button></div></div>
@@ -41,15 +31,17 @@
       </div>
       <section class="card snapshots"><div class="section-head"><div><h2>Safety Snapshots</h2><p>Before and after every push/pull.</p></div></div><div id="snapshotList" class="snapshot-list"></div></section>
       <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Native builds found in the application folder.</p></div></div><div id="downloadListApp" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
-      <section class="card contact-card"><div><h2>Project contact</h2><p class="muted">Your authenticated GitHub account and email are kept server-side and shown here only to you.</p></div><div id="accountContact" class="account-contact"></div></section>
       <section class="card install"><div><h2>Install the app</h2><p>On Android or a modern desktop browser, use the button below to install the PWA. The same hosted account works across your devices.</p></div><button id="installBtn2" class="secondary">Install</button></section>
     </section>
   </main>
   <dialog id="addDialog"><form method="dialog" id="addForm"><h2>Add Project</h2><label>Project name<input id="projectName" name="projectName" placeholder="my-project" /></label><div class="file-picks"><label class="pick"><span>📁 Add folder</span><input id="folderInput" type="file" webkitdirectory directory multiple /></label><label class="pick"><span>📄 Add files</span><input id="fileInput" type="file" multiple /></label></div><div id="addCount" class="muted">0 files selected</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="saveProject" class="primary" type="submit">Add Project</button></div></form></dialog>
-  <dialog id="pushDialog"><form method="dialog" id="pushForm"><h2>Push Project</h2><div class="muted" id="pushProjectName"></div><label>GitHub repository<select id="repoSelect"><option value="">＋ Create a new repository</option></select></label><label id="newRepoRow">New repository name<input id="newRepoName" /></label><label id="visibilityRow">Visibility<select id="visibility"><option value="private">Private</option><option value="public">Public</option></select></label><label>Branch<input id="branch" value="main" /></label><div class="warning">Existing repository history is never force-pushed. Unrelated histories must be merged manually first.</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="confirmPush" class="primary" type="submit">Push</button></div></form></dialog>
+  <dialog id="pushDialog"><form method="dialog" id="pushForm"><h2>Push Project</h2><div class="muted" id="pushProjectName"></div><label>GitHub repository<select id="repoSelect"><option value="">＋ Create a new repository</option></select></label><label id="newRepoRow">New repository name<input id="newRepoName" /></label><label id="visibilityRow">Visibility<select id="visibility"><option value="private">Private</option><option value="public">Public</option></select></label><label>Branch<input id="branch" value="main" /></label><div class="warning">A selected repository with unrelated existing history may require a manual merge. The app will not force-push over it.</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="confirmPush" class="primary" type="submit">Push</button></div></form></dialog>
   <dialog id="feedbackDialog"><form id="feedbackForm"><h2>Send feedback</h2><p class="muted">Tell us what worked, what broke, or what you want next.</p><label>Name<input name="name" maxlength="120" autocomplete="name"></label><label>Email<input name="email" type="email" maxlength="254" autocomplete="email"></label><label>GitHub username<input name="github" maxlength="120" autocomplete="username"></label><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><label>Feedback<textarea name="message" rows="6" maxlength="8000" required></textarea></label><div class="form-status" role="status"></div><div class="dialog-actions"><button type="button" class="ghost" data-close-dialog>Cancel</button><button class="primary" type="submit">Send feedback</button></div></form></dialog>
   <dialog id="contributeDialog"><form id="contributeForm"><h2>Contribute</h2><p class="muted">Suggest code, docs, testing, design, security improvements, or another concrete way to help.</p><label>Name<input name="name" maxlength="120" autocomplete="name"></label><label>Email<input name="email" type="email" maxlength="254" autocomplete="email"></label><label>GitHub username<input name="github" maxlength="120" autocomplete="username"></label><label>Contribution type<select name="type"><option>code</option><option>documentation</option><option>testing</option><option>design</option><option>security</option><option>idea</option><option>other</option></select></label><label>Title<input name="title" maxlength="200" required></label><label>Link<input name="link" maxlength="1000" placeholder="https://github.com/..." type="url"></label><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><label>Description<textarea name="description" rows="7" maxlength="8000" required></textarea></label><div class="form-status" role="status"></div><div class="dialog-actions"><button type="button" class="ghost" data-close-dialog>Cancel</button><button class="primary" type="submit">Submit contribution</button></div></form></dialog>
   <div id="toast" class="toast" role="status"></div>
-  <script src="config.js"></script><script src="feedback.js"></script><script src="app.js"></script>
+  <script src="config.js"></script>
+  <script src="theme.js"></script>
+  <script src="feedback.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
