@@ -44,6 +44,8 @@ Create or edit your GitHub OAuth App and set:
 
 GitHub's current OAuth documentation recommends the `state` parameter and PKCE (`S256`) for the web application flow. The backend implements both, and it exchanges the OAuth code server-side so the GitHub client secret never reaches the GitHub Pages frontend.
 
+Repository Git operations use per-project SSH deploy keys over port 443. The OAuth request needs `repo write:public_key offline_access`; users who authorized an earlier scope must sign out and sign in again after deploying this version. GitHub also requires the signed-in account to have admin access when registering a deploy key on a repository.
+
 ## 4. Lock the app to your own GitHub account
 
 For a personal deployment, leave these settings enabled:
@@ -82,6 +84,7 @@ The frontend never receives the GitHub OAuth client secret or the Supabase servi
 - Sessions, OAuth state, one-time login codes, and SSE tickets: Supabase Postgres.
 - Project metadata: Supabase Postgres.
 - Uploaded project working trees, including `.git` history: private Supabase Storage archive per project.
+- Per-project GitHub SSH deploy keys: encrypted with `TOKEN_ENCRYPTION_KEY` and stored in the private Supabase bucket.
 - Before/after snapshots: private Supabase Storage archives plus snapshot metadata in Postgres.
 - Server temporary files: `/tmp`; these are disposable and are recreated as needed.
 
@@ -101,6 +104,7 @@ These conservative values keep ordinary archives under Supabase Free's per-file 
 
 - OAuth `state` and PKCE S256 protect the sign-in flow.
 - GitHub tokens are encrypted with AES-256-GCM before they enter the database.
+- Per-project SSH private keys are encrypted with AES-256-GCM before they enter private object storage.
 - The browser gets only an application session token; it never receives the GitHub token or service-role key.
 - Session tokens are stored only as HMAC hashes in the database and expire automatically.
 - Cross-origin GitHub Pages access uses a short-lived login code and a short-lived SSE ticket.

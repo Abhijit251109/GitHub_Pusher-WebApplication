@@ -36,6 +36,8 @@ In the GitHub OAuth App, use:
 
 The backend uses `state` and PKCE S256 for the OAuth web flow.
 
+Repository Git operations use per-project SSH deploy keys over port 443. The OAuth request needs `repo write:public_key offline_access`; users who authorized an earlier scope must sign out and sign in again after deploying this version. GitHub also requires the signed-in account to have admin access when registering a deploy key on a repository.
+
 ## 4. Personal-account allowlist
 
 For a personal deployment, keep:
@@ -61,6 +63,7 @@ The following remain intact across Render restart, free-tier spin-down, and rede
 - application sessions and OAuth state
 - project metadata
 - project working trees, including `.git` history
+- encrypted per-project GitHub SSH deploy keys
 - before/after snapshots
 
 Supabase Free currently includes 500 MB of database capacity and 1 GB of file storage. Keep the archive/snapshot limits conservative and export important data independently because Free does not include automatic database backups.

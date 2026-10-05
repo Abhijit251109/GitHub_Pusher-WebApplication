@@ -65,7 +65,7 @@ services:
       - key: GITHUB_CALLBACK_URL
         sync: false
       - key: GITHUB_OAUTH_SCOPE
-        value: repo offline_access
+        value: repo write:public_key offline_access
       - key: GITHUB_ALLOW_SIGNUP
         value: "true"
       - key: REQUIRE_GITHUB_ALLOWLIST
