@@ -26,3 +26,5 @@ dialog::backdrop{background:rgba(0,0,0,.55)}
 :root[data-theme="light"] .auth small{color:var(--muted)}:root[data-theme="light"] .orb,:root[data-theme="light"] .project-icon{background:#ede9fe;color:#4c1d95}
 :root[data-theme="light"] .state{background:#ecfdf5;color:#166534}:root[data-theme="light"] .state.conflict{background:#fff7ed;color:#9a3412}:root[data-theme="light"] .state.error{background:#fef2f2;color:#991b1b}
 :root[data-theme="system"] .theme-control select{color:var(--text)}
+:root{color-scheme:dark}:root[data-theme="light"]{color-scheme:light}@media (prefers-color-scheme: light){:root[data-theme="system"]{color-scheme:light}}
+.dot.connected{background:var(--accent2)}.dot.disconnected{background:var(--danger)}

@@ -38,8 +38,10 @@ The Render filesystem is temporary. Important application data is never treated 
 
 ## Run locally
 
+Use Node.js 22.9 or newer in the 22.x line and npm 10. The minimum Node version is needed for the built-in optional `.env` file support used by the start scripts.
+
 ```bash
-npm install
+npm ci
 npm start
 ```
 

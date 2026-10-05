@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+node_modules
+**/node_modules
+data
+workspace
+dist
+release
+*.log
+.DS_Store
+.aws
+.ssh
+.codex
+.agents

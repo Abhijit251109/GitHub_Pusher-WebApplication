@@ -10,6 +10,6 @@ Targets:
 
 Build prerequisites:
 
-- Node.js 22+
-- The public server URL in `GPP_APP_URL`
+- Node.js 22.9 or newer in the 22.x line
+- The production Render server URL is the default; set `GPP_APP_URL` to override it
 - Platform-native signing tools when creating release installers

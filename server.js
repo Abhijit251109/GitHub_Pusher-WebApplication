@@ -1,11 +1,14 @@
 import express from 'express';
 import multer from 'multer';
 import fs from 'fs/promises';
+import { createWriteStream } from 'node:fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
+import { Transform } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { createClient } from '@supabase/supabase-js';
 import * as tar from 'tar';
 import helmet from 'helmet';
@@ -70,11 +73,36 @@ await fs.mkdir(CONTRIBUTE_DIR, { recursive: true });
 await fs.mkdir(APPLICATIONS, { recursive: true });
 await Promise.all(Object.keys(APPLICATION_PLATFORMS).map(platform => fs.mkdir(path.join(APPLICATIONS, platform), { recursive: true })));
 
+const uploadStorage = {
+  _handleFile(req, file, cb) {
+    const filename = `${crypto.randomUUID()}-${normalizeName(path.basename(file.originalname || 'file'))}`;
+    const fullPath = path.join(UPLOAD_TEMP, filename);
+    const totalSizeLimit = new Transform({
+      transform(chunk, _encoding, callback) {
+        const total = (req.gppUploadBytes || 0) + chunk.length;
+        if (total > MAX_TOTAL_UPLOAD) {
+          const error = new Error(`Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`);
+          error.code = 'LIMIT_TOTAL_UPLOAD';
+          callback(error);
+          return;
+        }
+        req.gppUploadBytes = total;
+        callback(null, chunk);
+      }
+    });
+    pipeline(file.stream, totalSizeLimit, createWriteStream(fullPath, { flags: 'wx' }))
+      .then(async () => {
+        const stat = await fs.stat(fullPath);
+        cb(null, { destination: UPLOAD_TEMP, filename, path: fullPath, size: stat.size });
+      })
+      .catch(error => fs.rm(fullPath, { force: true }).catch(() => {}).then(() => cb(error)));
+  },
+  _removeFile(_req, file, cb) {
+    fs.rm(file.path, { force: true }).then(() => cb(null), cb);
+  }
+};
 const upload = multer({
-  storage: multer.diskStorage({
-    destination: (_req, _file, cb) => cb(null, UPLOAD_TEMP),
-    filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${normalizeName(path.basename(file.originalname || 'file'))}`)
-  }),
+  storage: uploadStorage,
   limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE }
 });
 
@@ -1009,12 +1037,17 @@ app.get('/api/projects', async (req, res) => {
     res.json(list.map(p => ({ ...p, files: p.fileCount })));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
+app.post('/api/projects', ensureRequestProtection, async (req, res, next) => {
+  const auth = await authUser(req, res);
+  if (!auth) return;
+  req.gppAuth = auth;
+  next();
+}, (req, res, next) => {
   const len = Number(req.headers['content-length'] || 0);
   if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.` });
   next();
 }, upload.array('files', MAX_FILES), async (req, res) => {
-  const a = await authUser(req, res); if (!a) return;
+  const a = req.gppAuth;
   let workspace = null;
   try {
     const files = req.files || [];
@@ -1221,6 +1254,7 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.use((err, _req, res, next) => {
+  if (err?.code === 'LIMIT_TOTAL_UPLOAD') return res.status(413).json({ error: err.message });
   if (err instanceof multer.MulterError) return res.status(413).json({ error: `Upload rejected: ${err.message}` });
   if (err) return res.status(500).json({ error: 'Unexpected server error.' });
   next();

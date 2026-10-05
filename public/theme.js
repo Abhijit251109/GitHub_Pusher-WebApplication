@@ -8,7 +8,6 @@
   const apply = value => {
     const theme = valid.has(value) ? value : 'system';
     document.documentElement.dataset.theme = theme;
-    document.documentElement.style.colorScheme = theme === 'system' ? 'light dark' : theme;
     localStorage.setItem(KEY, theme);
     document.querySelectorAll('[data-theme-select], #themeSelect').forEach(el => { el.value = theme; });
     const meta = document.querySelector('meta[name="theme-color"]');

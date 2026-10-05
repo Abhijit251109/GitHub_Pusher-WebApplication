@@ -28,7 +28,7 @@
   },
   "main": "electron/main.cjs",
   "engines": {
-    "node": "22.x",
+    "node": ">=22.9.0 <23",
     "npm": ">=10 <12"
   },
   "packageManager": "npm@10.9.2"

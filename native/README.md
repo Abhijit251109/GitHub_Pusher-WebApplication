@@ -9,12 +9,12 @@ The desktop target is implemented by the Electron shell in `electron/`; `native/
 Build from the project root:
 
 ```bash
-npm install
-GPP_APP_URL=https://YOUR-DOMAIN npm run desktop
+npm ci
+npm run desktop
 npm run build:desktop
 ```
 
-Build the installer on Windows, macOS, or Linux (or use a CI matrix for all three).
+The desktop shell defaults to the production Render service. Set `GPP_APP_URL` before running or building it to use another hosted backend. Build the installer on Windows, macOS, or Linux (or use a CI matrix for all three).
 
 ## Android
 
@@ -29,4 +29,4 @@ cd android
 
 For a release AAB/APK, configure signing in Android Studio or Gradle and use the release build task.
 
-Capacitor writes the buildable Android project to the standard root `android/` directory. The hosted HTTPS URL is configured through `GPP_APP_URL`; HTTP is only enabled when that variable explicitly uses `http://`.
+Capacitor writes the buildable Android project to the standard root `android/` directory. It defaults to the production Render service. Set `GPP_APP_URL` to use another hosted backend; for Android emulator development, use `http://10.0.2.2:4173`.

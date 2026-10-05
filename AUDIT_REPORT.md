@@ -18,7 +18,7 @@ This report corresponds to the current 3.0.x build after the Supabase persistenc
 - Backend Supabase secrets are not shipped in the GitHub Pages artifact or the distributable ZIP.
 
 ## Dependency reproducibility
-The supplied archive intentionally does not include the previous hand-written partial `package-lock.json`: it was not a complete lockfile and could not be safely regenerated in this offline environment. The project uses exact direct dependency versions and `npm install` in Render/CI. Generate a fresh lockfile with `npm install` from a networked development environment when strict `npm ci` reproducibility is required.
+`package-lock.json` is synchronized with the exact dependency versions in `package.json`. Render and Docker install production dependencies with `npm ci`; desktop build workflows use `npm ci` to reproduce the locked development toolchain. The application’s direct `tar` dependency remains pinned at 7.5.22.
 
 ## Intentionally unchanged
 This remediation pass does **not** add a general-purpose API/request rate limiter.

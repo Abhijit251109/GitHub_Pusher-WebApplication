@@ -4,14 +4,14 @@ This version is designed for **GitHub Pages + Render Free + Supabase Free**. Git
 
 ## 1. Supabase
 
-Run `supabase/schema.sql` once in the Supabase SQL Editor. Copy the project URL and the server-only service-role key into the Render environment. Never put the service-role key in `public/` or a GitHub Pages build.
+The production Supabase project is already initialized with the schema and private `gpp-private` storage bucket. For a new deployment, run `supabase/schema.sql` once in the Supabase SQL Editor, then add the project URL and server-only `SUPABASE_SECRET_KEY` to Render. The backend also accepts the legacy `SUPABASE_SERVICE_ROLE_KEY` name. Never put either server-only key in `public/` or a GitHub Pages build.
 
 ## 2. Render Free
 
 Use the included `render.yaml`, or manually create a **Free Web Service** with:
 
 ```text
-Build:  npm install --no-audit --no-fund
+Build:  npm ci --omit=dev --no-audit --no-fund
 Start:  npm start
 Health: /api/health
 ```
@@ -22,7 +22,7 @@ Set the variables in `.env.example`, including:
 PUBLIC_BASE_URL=https://github-pusher-g3ac.onrender.com
 FRONTEND_URL=https://USERNAME.github.io/REPOSITORY
 SUPABASE_URL=https://YOUR-PROJECT.supabase.co
-SUPABASE_SERVICE_ROLE_KEY=...
+SUPABASE_SECRET_KEY=...
 ```
 
 Render Free's filesystem is ephemeral, so do not store application data under `/app/data`. The server only uses temporary local space for upload and Git operations; durable state is in Supabase.
