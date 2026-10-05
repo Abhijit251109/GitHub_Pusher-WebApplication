@@ -1,6 +1,5 @@
 // Public GitHub Pages configuration.
 //
-// Public frontend configuration. Auth0 domain/client ID are served securely by the backend at /api/auth0/config.
 // The Supabase publishable key is intentionally included in this browser bundle.
 // Publishable keys are designed for client-side use and are NOT a replacement for
 // the backend service-role key. Keep SUPABASE_SERVICE_ROLE_KEY only on Render.
@@ -13,7 +12,7 @@
 // privileged operations.
 window.GPP_CONFIG = Object.assign({
   // Render production API. Change this only if your Render service uses a different URL.
-  API_BASE: 'https://github-project-pusher.onrender.com',
+  API_BASE: 'https://github-pusher-g3ac.onrender.com',
   SUPABASE_URL: 'https://vsrooptemnxxqolzbeze.supabase.co',
   SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_DemHkA2PuMrqymIjUyFNJg_MYy1fFpo'
 }, window.GPP_CONFIG || {});

@@ -5,7 +5,7 @@ GitHub Project Pusher is split into a static frontend and a lightweight Node bac
 ## Components
 
 - `public/` — responsive web UI and PWA shell. This directory is independently deployable to GitHub Pages.
-- `server.js` — Express API, Auth0 JWT validation, GitHub OAuth/PKCE connection handling, encrypted GitHub token storage, project operations, snapshot management, and sync worker.
+- `server.js` — Express API, GitHub OAuth/PKCE callback handling, encrypted GitHub token storage, project operations, snapshot management, and sync worker.
 - Supabase Postgres — users, sessions, OAuth attempts, one-time login codes, SSE tickets, projects, and snapshot metadata.
 - Supabase Storage — private compressed archives containing project working trees (including `.git`) and before/after snapshots.
 - `electron/` — desktop shell.
@@ -13,11 +13,12 @@ GitHub Project Pusher is split into a static frontend and a lightweight Node bac
 
 ## Authentication flow
 
-1. The browser starts Auth0 Universal Login using the Auth0 SPA JS SDK (authorization code + PKCE).
-2. Auth0 returns a JWT access token for the configured API audience.
-3. The browser sends that bearer token to Render; the backend validates issuer, audience, signature, and expiry before mapping `sub` to a persistent application user.
-4. Auth0 users can then choose **Connect GitHub** in the dashboard. The backend starts a separate GitHub OAuth/PKCE flow and attaches the encrypted GitHub access/refresh tokens to that Auth0 user.
-5. Existing GitHub-only sessions remain supported for backwards compatibility.
+1. The browser starts GitHub OAuth at the backend.
+2. The backend stores a short-lived state + PKCE verifier in Supabase and binds the attempt to a short-lived HttpOnly browser cookie.
+3. GitHub redirects to the backend callback.
+4. The backend exchanges the code using the verifier and stores GitHub access/refresh tokens encrypted with AES-256-GCM.
+5. When the frontend is hosted on GitHub Pages, the backend redirects with a one-time short-lived login code. The frontend exchanges that code for an application session token.
+6. Only a hash of the application session token is stored in Postgres.
 
 ## Project persistence
 

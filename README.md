@@ -4,8 +4,7 @@ A public-hostable GitHub project library with a static GitHub Pages frontend, a 
 
 ## Main features
 
-- Auth0 authentication with Google + Username/Password via Universal Login
-- GitHub OAuth/PKCE connection for repository access and push operations
+- GitHub OAuth authentication with OAuth state + PKCE S256
 - Optional numeric-GitHub-ID allowlist for personal deployments
 - Encrypted GitHub tokens stored only on the server
 - Persistent project metadata in Postgres
@@ -24,7 +23,7 @@ A public-hostable GitHub project library with a static GitHub Pages frontend, a 
 ```text
 GitHub Pages (public/)
         |
-        | HTTPS API + Auth0 bearer tokens
+        | HTTPS API + short-lived login code
         v
 Render Free Web Service (Node/Express)
         |
@@ -32,8 +31,7 @@ Render Free Web Service (Node/Express)
         |
         +---- Supabase Storage (project archives + snapshots)
         |
-        +---- Auth0 (identity)
-        +---- GitHub OAuth + GitHub API (repository connection)
+        +---- GitHub OAuth + GitHub API
 ```
 
 The Render filesystem is temporary. Important application data is never treated as durable local state.
