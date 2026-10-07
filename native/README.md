@@ -18,14 +18,14 @@ The desktop shell defaults to the production Render service. Set `GPP_APP_URL` b
 
 ## Android
 
-The checked-in Android scaffold is in `native/android/`; the supported Capacitor build generates the canonical root `android/` project.
+The checked-in Android scaffold is in `native/android/`; the supported Capacitor build generates the canonical root `android/` project. Run these commands from the project root:
 
 ```bash
-npm install
-npx cap sync android
-cd android
-./gradlew assembleDebug
+npm ci
+npm run build:android
 ```
+
+`build:android` creates or syncs the root `android/` project and runs the debug APK build. For Android Studio, run `npm ci` and `npm run prepare:android` first, then open the root `android/` directory. The `native/android/` scaffold expects `node_modules/@capacitor/android/capacitor` to exist, so Gradle sync fails before JavaScript dependencies are installed.
 
 For a release AAB/APK, configure signing in Android Studio or Gradle and use the release build task.
 

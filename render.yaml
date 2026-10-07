@@ -33,7 +33,7 @@ services:
       - key: MAX_ARCHIVE_ENTRIES
         value: "10000"
       - key: MAX_DECOMPRESSION_RATIO
-        value: "20"
+        value: "40.00"
       - key: MAX_SNAPSHOTS_PER_PROJECT
         value: "10"
       - key: APP_NAME
