@@ -25,7 +25,32 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Build MSI
-        run: npm run build:windows-installer -- --x64 --publish never
+        shell: pwsh
+        env:
+          DEBUG: electron-builder
+        run: |
+          $maxAttempts = 2
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Build attempt $attempt of $maxAttempts"
+            $buildOutput = & npm run build:windows-installer -- --x64 --publish never 2>&1
+            $buildExitCode = $LASTEXITCODE
+            $buildOutput | ForEach-Object { Write-Host $_ }
+
+            if ($buildExitCode -eq 0) { exit 0 }
+
+            $buildLog = $buildOutput -join [Environment]::NewLine
+            $retryableFailure = $buildLog -match "ERR_ELECTRON_BUILDER_CANNOT_EXECUTE|zip: not a valid zip file"
+            if (-not $retryableFailure -or $attempt -eq $maxAttempts) {
+              exit $buildExitCode
+            }
+
+            Write-Warning "Retrying after clearing electron-builder download caches."
+            $electronCache = Join-Path $env:LOCALAPPDATA "electron\Cache"
+            $builderCache = Join-Path $env:LOCALAPPDATA "electron-builder\Cache"
+            Remove-Item -LiteralPath $electronCache -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $builderCache -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "dist" -Recurse -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Upload github_pusher.msi
         uses: actions/upload-artifact@v4

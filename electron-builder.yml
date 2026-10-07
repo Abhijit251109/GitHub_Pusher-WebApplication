@@ -5,7 +5,7 @@ files:
 mac:
   target: dmg
 win:
-  icon: public/icons/icon.svg
+  icon: public/icons/icon.ico
   target:
     - msi
     - nsis
