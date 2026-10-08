@@ -9,8 +9,8 @@ Render currently offers free Node web services, but their filesystem is ephemera
 1. Create a Supabase project on the Free plan.
 2. Open **SQL Editor**.
 3. Paste and run `supabase/schema.sql`.
-4. In **Project Settings → API**, copy the project URL and the server-only **service role** key.
-5. Keep the service-role key secret. Never put it in `public/`, GitHub Pages, or a client bundle.
+4. In **Project Settings → API Keys → Secret keys**, copy the project URL and a server-only secret key starting with sb_secret_.
+5. Set it as SUPABASE_SECRET_KEY in Render. Never put it in public/, GitHub Pages, or a client bundle. Older Supabase projects may use the legacy service_role key as SUPABASE_SERVICE_ROLE_KEY.
 6. The SQL creates a private bucket named `gpp-private` with a 50 MB object limit. The app keeps individual project archives below its own 45 MB limit so it remains compatible with the Free plan's upload ceiling.
 
 ## 2. Create the Render service
@@ -115,3 +115,9 @@ These conservative values keep ordinary archives under Supabase Free's per-file 
 - Storage is private; no project archive is made public.
 
 For stronger recovery guarantees than the Free plans provide, periodically export important data. Supabase Free does not include automatic backups for the database.
+
+## 9. Native application builds
+
+The GitHub Actions tab includes a manual Android APK build. Once these changes are on GitHub, pushing the v3.0.0 tag builds Windows, Intel and Apple Silicon macOS, and Android packages, then publishes them together as a GitHub Release. The website reads supported installers from the latest release.
+
+The Android APK is debug-signed for sideloading and testing; it is not signed for Play Store submission. Desktop packages are not signed with platform publisher certificates, so Windows and macOS may show their standard publisher verification prompts.

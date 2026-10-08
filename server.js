@@ -56,14 +56,43 @@ const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo write:public_key of
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
-const SUPABASE_SERVER_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SUPABASE_SERVER_KEYS = [...new Set([
+  process.env.SUPABASE_SECRET_KEY,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+].map(key => String(key || '').trim()).filter(Boolean))];
+const SUPABASE_SERVER_KEY = SUPABASE_SERVER_KEYS[0];
 const hasSupabase = Boolean(process.env.SUPABASE_URL && SUPABASE_SERVER_KEY);
+
+function supabaseFetchWithKeyFallback(keys) {
+  return async (input, init) => {
+    const request = new Request(input, init);
+    let response = await fetch(request.clone());
+    if (response.status !== 401 || !/unregistered api key/i.test(await response.clone().text())) {
+      return response;
+    }
+
+    for (const fallbackKey of keys.slice(1)) {
+      const headers = new Headers(request.headers);
+      headers.set('apikey', fallbackKey);
+      headers.set('authorization', 'Bearer ' + fallbackKey);
+      response = await fetch(new Request(request.clone(), { headers }));
+      if (response.status !== 401 || !/unregistered api key/i.test(await response.clone().text())) {
+        return response;
+      }
+    }
+    return response;
+  };
+}
+
 if (isProd && !hasSupabase) {
   throw new Error('Persistent storage is required in production. Set SUPABASE_URL and SUPABASE_SECRET_KEY.');
 }
 
 const supabase = hasSupabase
-  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, { auth: { autoRefreshToken: false, persistSession: false } })
+  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, {
+      auth: { autoRefreshToken: false, persistSession: false },
+      global: { fetch: supabaseFetchWithKeyFallback(SUPABASE_SERVER_KEYS) }
+    })
   : null;
 
 await fs.mkdir(UPLOAD_TEMP, { recursive: true });
@@ -126,7 +155,7 @@ app.use(helmet({
       scriptSrc: ["'self'"],
       styleSrc: ["'self'"],
       imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'", ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
+      connectSrc: ["'self'", 'https://api.github.com', ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],

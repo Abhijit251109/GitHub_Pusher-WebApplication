@@ -1,4 +1,7 @@
 const CONFIG = window.GPP_CONFIG || { API_BASE: '' };
+const RELEASES_API = String(CONFIG.RELEASES_API || '').trim();
+const RELEASES_PAGE = String(CONFIG.RELEASES_PAGE || '').trim();
+const RELEASES_DOWNLOAD_BASE = String(CONFIG.RELEASES_DOWNLOAD_BASE || '').replace(/\/+$/, '') + '/';
 const trimBase = value => String(value || '').trim().replace(/\/+$/, '');
 const IS_PAGES_HOST = /(^|\.)github\.io$/.test(location.hostname) || /(^|\.)githubusercontent\.com$/.test(location.hostname);
 const CONFIGURED_API_BASE = trimBase(CONFIG.API_BASE || '');
@@ -13,7 +16,7 @@ const API_ORIGIN = API_BASE || window.location.origin;
 const tokenStore = window.sessionStorage;
 const getToken = () => tokenStore.getItem('gpp_access_token') || '';
 const apiUrl = path => new URL(path.replace(/^\/+/, ''), API_ORIGIN.replace(/\/+$/, '') + '/').toString();
-let projects=[];let selectedId=null;let deferredInstall=null;
+let projects=[];let selectedId=null;let deferredInstall=null;let latestReleaseDownloadsPromise=null;
 const $=id=>document.getElementById(id);
 const toast=(msg)=>{const t=$('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2600)};
 async function api(url,opts={}){const headers=new Headers(opts.headers||{});const token=getToken();if(token)headers.set('Authorization',`Bearer ${token}`);const r=await fetch(apiUrl(url),{credentials:'include',...opts,headers});if(!r.ok){let d={};try{d=await r.json()}catch{}throw new Error(d.error||`Request failed (${r.status})`)}return r.json()}
@@ -21,8 +24,55 @@ function render(){const q=$('search').value.trim().toLowerCase();const list=proj
 function renderDetails(){const p=projects.find(x=>x.id===selectedId);const has=!!p;$('details').hidden=!has;$('detailsEmpty').hidden=has;$('pushBtn').disabled=!has;$('removeBtn').disabled=!has;if(!has){$('snapshotList').innerHTML='';return}$('details').innerHTML=`<dl><dt>Name</dt><dd>${escapeHtml(p.name)}</dd><dt>Files</dt><dd>${p.files||0}</dd><dt>GitHub</dt><dd>${p.repoFullName?`<a href="${p.repoUrl}" target="_blank" rel="noreferrer">${escapeHtml(p.repoFullName)}</a>`:'Not connected'}</dd><dt>Branch</dt><dd>${escapeHtml(p.branch||'—')}</dd><dt>Sync</dt><dd>${escapeHtml(p.syncMessage||'—')}</dd><dt>Last push</dt><dd>${p.lastPushedAt?formatDate(p.lastPushedAt):'—'}</dd><dt>Last pull</dt><dd>${p.lastSyncAt?formatDate(p.lastSyncAt):'—'}</dd></dl>`;loadHistory(p.id)}
 async function selectProject(id){selectedId=id;render()}
 function formatBytes(n){if(n<1024)return `${n} B`;if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`;if(n<1024*1024*1024)return `${(n/1024/1024).toFixed(1)} MB`;return `${(n/1024/1024/1024).toFixed(1)} GB`}
-function renderDownloads(items, targetId){const el=$(targetId);if(!el)return;const groups={windows:[],macos:[],android:[],linux:[]};for(const item of items){if(groups[item.platform])groups[item.platform].push(item)}const cards=[];for(const platform of ['windows','macos','android','linux']){const label={windows:'Windows',macos:'macOS',android:'Android',linux:'Linux'}[platform];for(const item of groups[platform]){const href=apiUrl(item.url);cards.push(`<div class="download-card"><div><div class="download-title">${label}</div><div class="download-meta">${escapeHtml(item.name)} · ${formatBytes(item.size)} · ${formatDate(item.modifiedAt)}</div></div><a class="secondary" href="${href}">Download</a></div>`)}}el.innerHTML=cards.length?cards.join(''):'<div class="muted download-empty">No native application builds have been uploaded yet.</div>'}
-async function loadApplications(){try{const items=await api('/api/applications');renderDownloads(items,'downloadList');renderDownloads(items,'downloadListApp')}catch{renderDownloads([],'downloadList');renderDownloads([],'downloadListApp')}}
+async function latestReleaseDownloads(){
+  if(!RELEASES_API||!RELEASES_DOWNLOAD_BASE)return [];
+  if(!latestReleaseDownloadsPromise){
+    latestReleaseDownloadsPromise=fetch(RELEASES_API,{headers:{Accept:'application/vnd.github+json'},signal:AbortSignal.timeout(5000)}).then(async response=>{
+      if(!response.ok)return [];
+      const release=await response.json();
+      const publishedAt=release.published_at||release.created_at||'';
+      return (Array.isArray(release.assets)?release.assets:[]).map(asset=>{
+        const name=String(asset?.name||'');
+        const extension=name.toLowerCase().split('.').pop();
+        const platform=['msi','exe'].includes(extension)?'windows':['dmg','pkg'].includes(extension)?'macos':['apk','aab'].includes(extension)?'android':['appimage','deb','rpm'].includes(extension)?'linux':null;
+        const url=String(asset?.browser_download_url||'');
+        if(!platform||!url.startsWith(RELEASES_DOWNLOAD_BASE))return null;
+        return {platform,name,size:Number(asset.size||0),modifiedAt:publishedAt,url};
+      }).filter(Boolean);
+    }).catch(()=>[]);
+  }
+  return latestReleaseDownloadsPromise;
+}
+function renderDownloads(items,targetId){
+  const el=$(targetId);if(!el)return;
+  const groups={windows:[],macos:[],android:[],linux:[]};
+  for(const item of items){if(groups[item.platform])groups[item.platform].push(item)}
+  const cards=[];
+  for(const platform of ['windows','macos','android','linux']){
+    const label={windows:'Windows',macos:'macOS',android:'Android',linux:'Linux'}[platform];
+    for(const item of groups[platform]){
+      const href=escapeHtml(apiUrl(item.url));
+      cards.push('<div class="download-card"><div><div class="download-title">'+label+'</div><div class="download-meta">'+escapeHtml(item.name)+' · '+formatBytes(item.size)+' · '+formatDate(item.modifiedAt)+'</div></div><a class="secondary" href="'+href+'">Download</a></div>');
+    }
+  }
+  const releasesLink=RELEASES_PAGE?'<a href="'+escapeHtml(RELEASES_PAGE)+'" target="_blank" rel="noreferrer">Browse all GitHub releases</a>.':'';
+  el.innerHTML=cards.length?cards.join(''):'<div class="muted download-empty">No native application builds have been published yet. '+releasesLink+'</div>';
+}
+async function loadApplications(){
+  const [localItems,releaseItems]=await Promise.all([
+    api('/api/applications').catch(()=>[]),
+    latestReleaseDownloads()
+  ]);
+  const seen=new Set();
+  const items=[...(Array.isArray(releaseItems)?releaseItems:[]),...(Array.isArray(localItems)?localItems:[])].filter(item=>{
+    const key=String(item.platform||'')+':'+String(item.name||'').toLowerCase();
+    if(seen.has(key))return false;
+    seen.add(key);
+    return true;
+  });
+  renderDownloads(items,'downloadList');
+  renderDownloads(items,'downloadListApp');
+}
 async function load(){await loadApplications();const me=await api('/api/auth/me');$('authView').hidden=me.authenticated;$('appView').hidden=!me.authenticated;if(!me.authenticated)return;$('userBox').innerHTML=`<span class="muted">@${escapeHtml(me.user.login)}</span> <button class="ghost" id="logout">Sign out</button>`;$('logout').onclick=async()=>{await api('/api/auth/logout',{method:'POST'});tokenStore.removeItem('gpp_access_token');location.reload()};await refresh();connectEvents()}
 async function refresh(){await loadApplications();projects=await api('/api/projects');if(selectedId&&!projects.some(p=>p.id===selectedId))selectedId=null;render()}
 async function loadHistory(id){const h=await api(`/api/projects/${id}/history`);$('snapshotList').innerHTML=h.length?h.map(x=>`<div class="snap"><strong>${escapeHtml(x.label||'snapshot')}</strong><span>${escapeHtml(x.createdAt||'')}</span></div>`).join(''):'<div class="muted">No snapshots yet.</div>'}

@@ -22,7 +22,7 @@
   </header>
   <main class="container">
     <section id="authView" class="card auth" hidden><div class="orb">⇄</div><h1>Your projects, always with you.</h1><p>Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p><a class="primary big" id="loginLink" href="login.html">Continue with GitHub</a><small>GitHub permissions are requested through GitHub's authorization screen. Your token stays server-side.</small></section>
-    <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Available builds are detected automatically from the application folder.</p></div></div><div id="downloadList" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
+    <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Latest Windows, macOS, and Android builds from GitHub Releases.</p></div></div><div id="downloadList" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
     <section id="appView" hidden>
       <div class="toolbar card"><div class="toolbar-left"><button id="addBtn" class="primary">＋ Add Project</button><button id="pushBtn" class="secondary" disabled>↥ Push Selected</button><button id="removeBtn" class="danger" disabled>Remove</button></div><div class="toolbar-right"><span id="liveDot" class="dot"></span><span id="liveText">Connecting…</span><button id="refreshBtn" class="ghost">Refresh</button></div></div>
       <div class="grid">
@@ -30,7 +30,7 @@
         <aside class="card details"><h2>Project Details</h2><div id="detailsEmpty" class="muted">Select a project to see GitHub, sync, and snapshot information.</div><div id="details" hidden></div></aside>
       </div>
       <section class="card snapshots"><div class="section-head"><div><h2>Safety Snapshots</h2><p>Before and after every push/pull.</p></div></div><div id="snapshotList" class="snapshot-list"></div></section>
-      <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Native builds found in the application folder.</p></div></div><div id="downloadListApp" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
+      <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Latest builds from GitHub Releases.</p></div></div><div id="downloadListApp" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
       <section class="card install"><div><h2>Install the app</h2><p>On Android or a modern desktop browser, use the button below to install the PWA. The same hosted account works across your devices.</p></div><button id="installBtn2" class="secondary">Install</button></section>
     </section>
   </main>
