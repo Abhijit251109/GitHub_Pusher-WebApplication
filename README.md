@@ -38,10 +38,8 @@ The Render filesystem is temporary. Important application data is never treated 
 
 ## Run locally
 
-Use Node.js 22.9 or newer in the 22.x line and npm 10. The minimum Node version is needed for the built-in optional `.env` file support used by the start scripts.
-
 ```bash
-npm ci
+npm install
 npm start
 ```
 
@@ -71,3 +69,10 @@ Run `supabase/schema.sql` in the Supabase SQL Editor. It creates the server-owne
 ## Security
 
 See [`SECURITY.md`](SECURITY.md). In particular, never put `GITHUB_CLIENT_SECRET`, `SUPABASE_SERVICE_ROLE_KEY`, `SESSION_SECRET`, or `TOKEN_ENCRYPTION_KEY` in `public/` or a GitHub Pages build.
+
+
+## Native application builds
+
+The Actions tab includes a manual Android APK build. Pushing a version tag such as `v3.0.0` runs the multi-platform release workflow and publishes a Windows MSI, Intel and Apple Silicon macOS DMGs, and an Android APK to the GitHub Releases page. The website reads supported installers from the latest release.
+
+The Android APK is debug-signed for sideloading and testing, not for Play Store submission. Desktop packages are not publisher-signed, so Windows and macOS may show standard publisher verification prompts.

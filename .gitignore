@@ -1,16 +1,18 @@
 node_modules/
 data/
 workspace/
-/android/
 *.log
 .env
 .env.*
-.env.example
+!.env.example
 dist/
 release/
 .DS_Store
 
 # Backend secrets / local environment
+.env
+.env.*
+!.env.example
 *.env.local
 *.env.production
 *.env.backup

@@ -9,8 +9,8 @@ Render currently offers free Node web services, but their filesystem is ephemera
 1. Create a Supabase project on the Free plan.
 2. Open **SQL Editor**.
 3. Paste and run `supabase/schema.sql`.
-4. In **Project Settings → API Keys → Secret keys**, copy the project URL and a server-only secret key starting with sb_secret_.
-5. Set it as SUPABASE_SECRET_KEY in Render. Never put it in public/, GitHub Pages, or a client bundle. Older Supabase projects may use the legacy service_role key as SUPABASE_SERVICE_ROLE_KEY.
+4. In **Project Settings → API**, copy the project URL and the server-only **service role** key.
+5. Keep the service-role key secret. Never put it in `public/`, GitHub Pages, or a client bundle.
 6. The SQL creates a private bucket named `gpp-private` with a 50 MB object limit. The app keeps individual project archives below its own 45 MB limit so it remains compatible with the Free plan's upload ceiling.
 
 ## 2. Create the Render service
@@ -20,8 +20,8 @@ Render currently offers free Node web services, but their filesystem is ephemera
 3. Render can use `render.yaml`, or you can enter the equivalent settings manually.
 4. Choose the **Free** plan.
 5. Set the secrets/environment values from `.env.example` and `render.yaml`.
-6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-pusher-g3ac.onrender.com`.
-7. Set `GITHUB_CALLBACK_URL` to `https://github-pusher-g3ac.onrender.com/auth/github/callback`.
+6. Set `PUBLIC_BASE_URL` to the final Render URL, such as `https://github-project-pusher.onrender.com`.
+7. Set `GITHUB_CALLBACK_URL` to `https://github-project-pusher.onrender.com/auth/github/callback`.
 8. Set `FRONTEND_URL` to your GitHub Pages URL, such as `https://USERNAME.github.io/REPOSITORY`.
 
 ### Required secrets
@@ -43,8 +43,6 @@ Create or edit your GitHub OAuth App and set:
 - **Authorization callback URL:** your Render callback URL
 
 GitHub's current OAuth documentation recommends the `state` parameter and PKCE (`S256`) for the web application flow. The backend implements both, and it exchanges the OAuth code server-side so the GitHub client secret never reaches the GitHub Pages frontend.
-
-Repository Git operations use per-project SSH deploy keys over port 443. The OAuth request needs `repo write:public_key offline_access`; users who authorized an earlier scope must sign out and sign in again after deploying this version. GitHub also requires the signed-in account to have admin access when registering a deploy key on a repository.
 
 ## 4. Lock the app to your own GitHub account
 
@@ -84,7 +82,6 @@ The frontend never receives the GitHub OAuth client secret or the Supabase servi
 - Sessions, OAuth state, one-time login codes, and SSE tickets: Supabase Postgres.
 - Project metadata: Supabase Postgres.
 - Uploaded project working trees, including `.git` history: private Supabase Storage archive per project.
-- Per-project GitHub SSH deploy keys: encrypted with `TOKEN_ENCRYPTION_KEY` and stored in the private Supabase bucket.
 - Before/after snapshots: private Supabase Storage archives plus snapshot metadata in Postgres.
 - Server temporary files: `/tmp`; these are disposable and are recreated as needed.
 
@@ -104,7 +101,6 @@ These conservative values keep ordinary archives under Supabase Free's per-file 
 
 - OAuth `state` and PKCE S256 protect the sign-in flow.
 - GitHub tokens are encrypted with AES-256-GCM before they enter the database.
-- Per-project SSH private keys are encrypted with AES-256-GCM before they enter private object storage.
 - The browser gets only an application session token; it never receives the GitHub token or service-role key.
 - Session tokens are stored only as HMAC hashes in the database and expire automatically.
 - Cross-origin GitHub Pages access uses a short-lived login code and a short-lived SSE ticket.
@@ -115,9 +111,3 @@ These conservative values keep ordinary archives under Supabase Free's per-file 
 - Storage is private; no project archive is made public.
 
 For stronger recovery guarantees than the Free plans provide, periodically export important data. Supabase Free does not include automatic backups for the database.
-
-## 9. Native application builds
-
-The GitHub Actions tab includes a manual Android APK build. Once these changes are on GitHub, pushing the v3.0.0 tag builds Windows, Intel and Apple Silicon macOS, and Android packages, then publishes them together as a GitHub Release. The website reads supported installers from the latest release.
-
-The Android APK is debug-signed for sideloading and testing; it is not signed for Play Store submission. Desktop packages are not signed with platform publisher certificates, so Windows and macOS may show their standard publisher verification prompts.

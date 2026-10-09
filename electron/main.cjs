@@ -1,7 +1,7 @@
 const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 
-const APP_URL = process.env.GPP_APP_URL || 'https://github-pusher-g3ac.onrender.com';
+const APP_URL = process.env.GPP_APP_URL || 'http://127.0.0.1:4173';
 
 function createWindow() {
   const win = new BrowserWindow({

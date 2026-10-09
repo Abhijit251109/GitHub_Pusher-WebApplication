@@ -44,7 +44,7 @@
   }
   function begin(base) {
     base = trimBase(base);
-    if (!validBase(base)) { error.textContent='Please enter a full URL starting with http:// or https://'; error.classList.add('visible'); return; }
+    if (!validBase(base)) { error.textContent='Please enter a full URL starting with http:// or https://'; error.style.display='block'; return; }
     sessionStorage.setItem('gpp_app_url', base);
     localStorage.setItem('gpp_app_url', base);
     const returnTo = location.href.split('#')[0];
@@ -54,7 +54,7 @@
   if (code) {
     const base = backendFromCurrentPage();
     if (!base) { status.textContent = 'Enter your backend URL to finish sign-in.'; setup.classList.remove('hidden'); }
-    else exchange(base).catch(err => { status.textContent='Login failed'; error.textContent=err.message; error.classList.add('visible'); setup.classList.remove('hidden'); });
+    else exchange(base).catch(err => { status.textContent='Login failed'; error.textContent=err.message; error.style.display='block'; setup.classList.remove('hidden'); });
     return;
   }
   const sameOriginBackend = backendFromCurrentPage();

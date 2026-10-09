@@ -1,17 +1,17 @@
 # Deployment checklist
 
-This version is designed for **GitHub Pages + Render Free + Supabase Free**. GitHub Pages serves the static frontend, Render runs the Node 22/Express backend, and Supabase stores the durable database and private project/snapshot archives.
+This version is designed for **GitHub Pages + Render Free + Supabase Free**. GitHub Pages serves the static frontend, Render runs the Node/Express backend, and Supabase stores the durable database and private project/snapshot archives.
 
 ## 1. Supabase
 
-The production Supabase project is already initialized with the schema and private `gpp-private` storage bucket. For a new deployment, run `supabase/schema.sql` once in the Supabase SQL Editor, then add the project URL and server-only `SUPABASE_SECRET_KEY` to Render. The backend also accepts the legacy `SUPABASE_SERVICE_ROLE_KEY` name. Never put either server-only key in `public/` or a GitHub Pages build.
+Run `supabase/schema.sql` once in the Supabase SQL Editor. Copy the project URL and the server-only service-role key into the Render environment. Never put the service-role key in `public/` or a GitHub Pages build.
 
 ## 2. Render Free
 
 Use the included `render.yaml`, or manually create a **Free Web Service** with:
 
 ```text
-Build:  npm ci --omit=dev --no-audit --no-fund
+Build:  npm install --no-audit --no-fund
 Start:  npm start
 Health: /api/health
 ```
@@ -19,10 +19,10 @@ Health: /api/health
 Set the variables in `.env.example`, including:
 
 ```env
-PUBLIC_BASE_URL=https://github-pusher-g3ac.onrender.com
+PUBLIC_BASE_URL=https://YOUR-RENDER-SERVICE.onrender.com
 FRONTEND_URL=https://USERNAME.github.io/REPOSITORY
 SUPABASE_URL=https://YOUR-PROJECT.supabase.co
-SUPABASE_SECRET_KEY=...
+SUPABASE_SERVICE_ROLE_KEY=...
 ```
 
 Render Free's filesystem is ephemeral, so do not store application data under `/app/data`. The server only uses temporary local space for upload and Git operations; durable state is in Supabase.
@@ -32,11 +32,9 @@ Render Free's filesystem is ephemeral, so do not store application data under `/
 In the GitHub OAuth App, use:
 
 - Homepage URL: your GitHub Pages URL
-- Authorization callback URL: `https://github-pusher-g3ac.onrender.com/auth/github/callback`
+- Authorization callback URL: `https://YOUR-RENDER-SERVICE.onrender.com/auth/github/callback`
 
 The backend uses `state` and PKCE S256 for the OAuth web flow.
-
-Repository Git operations use per-project SSH deploy keys over port 443. The OAuth request needs `repo write:public_key offline_access`; users who authorized an earlier scope must sign out and sign in again after deploying this version. GitHub also requires the signed-in account to have admin access when registering a deploy key on a repository.
 
 ## 4. Personal-account allowlist
 
@@ -63,7 +61,6 @@ The following remain intact across Render restart, free-tier spin-down, and rede
 - application sessions and OAuth state
 - project metadata
 - project working trees, including `.git` history
-- encrypted per-project GitHub SSH deploy keys
 - before/after snapshots
 
 Supabase Free currently includes 500 MB of database capacity and 1 GB of file storage. Keep the archive/snapshot limits conservative and export important data independently because Free does not include automatic database backups.
@@ -80,3 +77,10 @@ Supabase project URL configured for this build:
 `https://vsrooptemnxxqolzbeze.supabase.co`
 
 The Supabase publishable key is safe for the browser bundle; the Supabase secret key remains backend-only in `.env`/Render environment variables.
+
+
+## 9. Native application builds
+
+Use the Actions tab to run the manual Android APK build. A version tag such as `v3.0.0` runs the cross-platform release workflow and publishes Windows, Intel/Apple Silicon macOS, and Android packages to GitHub Releases. The public website lists supported installers from the latest release.
+
+The Android APK is a debug-signed sideloading build, not a Play Store release. Desktop builds are not publisher-signed and may trigger standard platform security prompts.

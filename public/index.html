@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <meta name="theme-color" content="#111827" />
+  <meta name="theme-color" content="#090d19" />
   <meta name="description" content="Persistent GitHub project library and live sync dashboard." />
   <link rel="manifest" href="manifest.webmanifest" />
   <link rel="icon" href="icons/icon.svg" />
@@ -12,36 +12,110 @@
 </head>
 <body>
   <header class="topbar">
-    <div><div class="brand">GitHub Project Pusher</div><div class="sub">Project library · GitHub sync · installable app</div></div>
-    <nav class="top-nav" aria-label="Project navigation">
-      <button id="feedbackBtn" data-open-feedback class="ghost" type="button">Feedback</button>
-      <button id="contributeBtn" data-open-contribute class="ghost" type="button">Contribute</button>
-      <label class="theme-control">Theme<select id="themeSelect" data-theme-select aria-label="Theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label>
-    </nav>
-    <div class="top-actions"><a class="ghost top-link" data-contact-github target="_blank" rel="noreferrer" hidden></a><a class="ghost top-link" data-contact-email hidden></a><button id="installBtn" class="ghost" hidden>Install App</button><div id="userBox"></div></div>
+    <a class="brand-lockup" href="./index.html" aria-label="GitHub Project Pusher home">
+      <span class="brand-mark" aria-hidden="true"><span>↗</span></span>
+      <span class="brand-copy"><span class="brand">GitHub Project Pusher</span><span class="sub">Projects in sync, wherever you build.</span></span>
+    </a>
+    <div class="top-actions">
+      <span class="top-chip"><span class="chip-dot"></span>Cloud workspace</span>
+      <button id="installBtn" class="ghost install-top" hidden>Install app</button>
+      <div id="userBox"></div>
+    </div>
   </header>
+
   <main class="container">
-    <section id="authView" class="card auth" hidden><div class="orb">⇄</div><h1>Your projects, always with you.</h1><p>Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p><a class="primary big" id="loginLink" href="login.html">Continue with GitHub</a><small>GitHub permissions are requested through GitHub's authorization screen. Your token stays server-side.</small></section>
-    <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Latest Windows, macOS, and Android builds from GitHub Releases.</p></div></div><div id="downloadList" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
-    <section id="appView" hidden>
-      <div class="toolbar card"><div class="toolbar-left"><button id="addBtn" class="primary">＋ Add Project</button><button id="pushBtn" class="secondary" disabled>↥ Push Selected</button><button id="removeBtn" class="danger" disabled>Remove</button></div><div class="toolbar-right"><span id="liveDot" class="dot"></span><span id="liveText">Connecting…</span><button id="refreshBtn" class="ghost">Refresh</button></div></div>
-      <div class="grid">
-        <section class="card projects"><div class="section-head"><div><h2>My Projects</h2><p id="projectSummary">0 projects</p></div><input id="search" placeholder="Search projects…" /></div><div id="projectList" class="project-list"></div><div id="empty" class="empty">No projects yet. Add a folder or select some code files.</div></section>
-        <aside class="card details"><h2>Project Details</h2><div id="detailsEmpty" class="muted">Select a project to see GitHub, sync, and snapshot information.</div><div id="details" hidden></div></aside>
+    <section class="hero-banner" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <div class="eyebrow"><span class="eyebrow-pulse"></span>YOUR PROJECT WORKSPACE</div>
+        <h1 id="hero-title">Build boldly.<br><span>Push with confidence.</span></h1>
+        <p>Bring your files, GitHub repositories and safety snapshots into one tidy workspace. Spend less time managing projects and more time making things.</p>
+        <div class="hero-points"><span><span class="point-check">✓</span> Cloud-saved library</span><span><span class="point-check">✓</span> Safer push and sync</span></div>
       </div>
-      <section class="card snapshots"><div class="section-head"><div><h2>Safety Snapshots</h2><p>Before and after every push/pull.</p></div></div><div id="snapshotList" class="snapshot-list"></div></section>
-      <section class="card downloads"><div class="section-head"><div><h2>Downloads</h2><p>Latest builds from GitHub Releases.</p></div></div><div id="downloadListApp" class="download-grid"><div class="muted">Checking for available builds…</div></div></section>
-      <section class="card install"><div><h2>Install the app</h2><p>On Android or a modern desktop browser, use the button below to install the PWA. The same hosted account works across your devices.</p></div><button id="installBtn2" class="secondary">Install</button></section>
+      <div class="hero-visual" aria-hidden="true">
+        <div class="hero-glow"></div>
+        <div class="orbit orbit-one"></div><div class="orbit orbit-two"></div>
+        <div class="terminal-card">
+          <div class="terminal-head"><span class="terminal-dots"><i></i><i></i><i></i></span><span>project-status</span><span class="terminal-ok">● synced</span></div>
+          <div class="terminal-body">
+            <div><span class="terminal-prompt">$</span> git status</div>
+            <p class="terminal-muted">On branch <b>main</b></p>
+            <p class="terminal-success">✓ Working tree clean</p>
+            <div class="terminal-divider"></div>
+            <div class="terminal-row"><span class="file-badge file-purple">JS</span><span>src/app.js</span><span class="file-state">tracked</span></div>
+            <div class="terminal-row"><span class="file-badge file-cyan">CSS</span><span>public/styles.css</span><span class="file-state">tracked</span></div>
+            <div class="terminal-row"><span class="file-badge file-green">MD</span><span>README.md</span><span class="file-state">saved</span></div>
+          </div>
+        </div>
+        <div class="float-chip float-cloud"><span>↥</span><div><strong>Cloud backup</strong><small>Snapshots protected</small></div></div>
+        <div class="float-chip float-live"><span class="live-rings"><i></i></span><div><strong>Live sync</strong><small>Ready when you are</small></div></div>
+      </div>
     </section>
+
+    <section id="authView" class="card auth" hidden>
+      <div class="auth-icon" aria-hidden="true"><span>↗</span></div>
+      <div class="eyebrow">WELCOME BACK</div>
+      <h2>Your projects, always with you.</h2>
+      <p>Sign in with GitHub to keep your project library in the cloud, push projects, and automatically pull remote changes.</p>
+      <a class="primary big" id="loginLink" href="login.html"><span>Continue with GitHub</span><span class="button-arrow">→</span></a>
+      <div class="auth-foot"><span class="secure-icon">✓</span> GitHub handles authorization. Your token stays server-side.</div>
+    </section>
+
+    <section id="appView" hidden>
+      <div class="workspace-heading">
+        <div><div class="eyebrow">WORKSPACE</div><h2>Your project hub</h2><p>Everything you’re building, all in one place.</p></div>
+        <div class="workspace-trust"><span class="trust-icon">⌁</span><span><strong>Built for safer pushes</strong><small>Snapshots before and after sync</small></span></div>
+      </div>
+
+      <div class="toolbar card">
+        <div class="toolbar-left">
+          <button id="addBtn" class="primary"><span class="button-symbol">＋</span> Add project</button>
+          <button id="pushBtn" class="secondary" disabled><span class="button-symbol">↥</span> Push selected</button>
+          <button id="removeBtn" class="danger" disabled><span class="button-symbol">−</span> Remove</button>
+        </div>
+        <div class="toolbar-right"><span id="liveDot" class="dot"></span><span id="liveText">Connecting…</span><button id="refreshBtn" class="ghost refresh-button"><span aria-hidden="true">↻</span> Refresh</button></div>
+      </div>
+
+      <div class="grid">
+        <section class="card projects">
+          <div class="section-head">
+            <div><div class="section-kicker">YOUR LIBRARY</div><h2>My projects</h2><p id="projectSummary">0 projects</p></div>
+            <label class="search-field"><span aria-hidden="true">⌕</span><input id="search" placeholder="Search projects…" aria-label="Search projects" /></label>
+          </div>
+          <div id="projectList" class="project-list"></div>
+          <div id="empty" class="empty"><span class="empty-graphic" aria-hidden="true">＋</span><strong>No projects yet</strong><p>Add a folder or select some code files to start your library.</p></div>
+        </section>
+        <aside class="card details">
+          <div class="details-heading"><span class="details-icon" aria-hidden="true">⌘</span><div><div class="section-kicker">SELECTED ITEM</div><h2>Project details</h2></div></div>
+          <div id="detailsEmpty" class="details-empty"><span class="detail-placeholder" aria-hidden="true">↖</span><p>Select a project to see its GitHub connection, branch, sync status and snapshot history.</p></div>
+          <div id="details" hidden></div>
+        </aside>
+      </div>
+
+      <section class="card snapshots">
+        <div class="section-head"><div><div class="section-kicker">ROLLBACK READY</div><h2>Safety snapshots</h2><p>Your project’s restore points, kept close at hand.</p></div><span class="section-icon" aria-hidden="true">◷</span></div>
+        <div id="snapshotList" class="snapshot-list"><div class="muted snapshot-placeholder">Choose a project to view its snapshots.</div></div>
+      </section>
+
+      <section class="card install install-banner">
+        <span class="install-mark" aria-hidden="true">↗</span>
+        <div><div class="section-kicker">TAKE IT WITH YOU</div><h2>Make your workspace feel at home.</h2><p>Install the app on a supported browser for quick access from your desktop or home screen.</p></div>
+        <button id="installBtn2" class="secondary">Install app <span class="button-arrow">→</span></button>
+      </section>
+    </section>
+
+    <section class="card downloads downloads-public">
+      <div class="section-head"><div><div class="section-kicker">NATIVE BUILDS</div><h2>Downloads</h2><p>Get the latest published installers for your device.</p></div><span class="download-orbit" aria-hidden="true">↓</span></div>
+      <div id="downloadList" class="download-grid"><div class="muted download-loading">Checking for available builds…</div></div>
+      <div class="downloads-footnote"><span class="secure-icon">✓</span> Builds are published through this project’s GitHub Releases.</div>
+    </section>
+    <footer class="page-footer"><span>GitHub Project Pusher</span><span>Keep shipping. Keep a snapshot.</span></footer>
   </main>
-  <dialog id="addDialog"><form method="dialog" id="addForm"><h2>Add Project</h2><label>Project name<input id="projectName" name="projectName" placeholder="my-project" /></label><div class="file-picks"><label class="pick"><span>📁 Add folder</span><input id="folderInput" type="file" webkitdirectory directory multiple /></label><label class="pick"><span>📄 Add files</span><input id="fileInput" type="file" multiple /></label></div><div id="addCount" class="muted">0 files selected</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="saveProject" class="primary" type="submit">Add Project</button></div></form></dialog>
-  <dialog id="pushDialog"><form method="dialog" id="pushForm"><h2>Push Project</h2><div class="muted" id="pushProjectName"></div><label>GitHub repository<select id="repoSelect"><option value="">＋ Create a new repository</option></select></label><label id="newRepoRow">New repository name<input id="newRepoName" /></label><label id="visibilityRow">Visibility<select id="visibility"><option value="private">Private</option><option value="public">Public</option></select></label><label>Branch<input id="branch" value="main" /></label><div class="warning">A selected repository with unrelated existing history may require a manual merge. The app will not force-push over it.</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="confirmPush" class="primary" type="submit">Push</button></div></form></dialog>
-  <dialog id="feedbackDialog"><form id="feedbackForm"><h2>Send feedback</h2><p class="muted">Tell us what worked, what broke, or what you want next.</p><label>Name<input name="name" maxlength="120" autocomplete="name"></label><label>Email<input name="email" type="email" maxlength="254" autocomplete="email"></label><label>GitHub username<input name="github" maxlength="120" autocomplete="username"></label><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><label>Feedback<textarea name="message" rows="6" maxlength="8000" required></textarea></label><div class="form-status" role="status"></div><div class="dialog-actions"><button type="button" class="ghost" data-close-dialog>Cancel</button><button class="primary" type="submit">Send feedback</button></div></form></dialog>
-  <dialog id="contributeDialog"><form id="contributeForm"><h2>Contribute</h2><p class="muted">Suggest code, docs, testing, design, security improvements, or another concrete way to help.</p><label>Name<input name="name" maxlength="120" autocomplete="name"></label><label>Email<input name="email" type="email" maxlength="254" autocomplete="email"></label><label>GitHub username<input name="github" maxlength="120" autocomplete="username"></label><label>Contribution type<select name="type"><option>code</option><option>documentation</option><option>testing</option><option>design</option><option>security</option><option>idea</option><option>other</option></select></label><label>Title<input name="title" maxlength="200" required></label><label>Link<input name="link" maxlength="1000" placeholder="https://github.com/..." type="url"></label><label class="honeypot" aria-hidden="true">Website<input name="website" tabindex="-1" autocomplete="off"></label><label>Description<textarea name="description" rows="7" maxlength="8000" required></textarea></label><div class="form-status" role="status"></div><div class="dialog-actions"><button type="button" class="ghost" data-close-dialog>Cancel</button><button class="primary" type="submit">Submit contribution</button></div></form></dialog>
-  <div id="toast" class="toast" role="status"></div>
+
+  <dialog id="addDialog"><form method="dialog" id="addForm"><div class="dialog-eyebrow">NEW WORKSPACE ITEM</div><h2>Add a project</h2><p class="dialog-copy">Choose the files or folder you want to keep in your cloud library.</p><label>Project name<input id="projectName" name="projectName" placeholder="my-project" autocomplete="off" /></label><div class="file-picks"><label class="pick"><span class="pick-icon">▧</span><strong>Add a folder</strong><small>Include a project directory</small><input id="folderInput" type="file" webkitdirectory directory multiple /></label><label class="pick"><span class="pick-icon">＋</span><strong>Add files</strong><small>Choose individual files</small><input id="fileInput" type="file" multiple /></label></div><div id="addCount" class="muted selection-count">0 files selected</div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="saveProject" class="primary" type="submit">Add project <span class="button-arrow">→</span></button></div></form></dialog>
+
+  <dialog id="pushDialog"><form method="dialog" id="pushForm"><div class="dialog-eyebrow">GITHUB SYNC</div><h2>Push your project</h2><div class="muted" id="pushProjectName"></div><label>GitHub repository<select id="repoSelect"><option value="">＋ Create a new repository</option></select></label><label id="newRepoRow">New repository name<input id="newRepoName" placeholder="my-project" /></label><label id="visibilityRow">Visibility<select id="visibility"><option value="private">Private</option><option value="public">Public</option></select></label><label>Branch<input id="branch" value="main" /></label><div class="warning"><span aria-hidden="true">⚑</span><span>A selected repository with unrelated existing history may require a manual merge. The app will not force-push over it.</span></div><div class="dialog-actions"><button class="ghost" value="cancel">Cancel</button><button id="confirmPush" class="primary" type="submit">Push project <span class="button-arrow">→</span></button></div></form></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="config.js"></script>
-  <script src="theme.js"></script>
-  <script src="feedback.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

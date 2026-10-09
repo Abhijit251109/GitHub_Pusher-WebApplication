@@ -5,7 +5,7 @@ const config: CapacitorConfig = {
   appName: 'GitHub Project Pusher',
   webDir: 'public',
   server: {
-    url: process.env.GPP_APP_URL || 'https://github-pusher-g3ac.onrender.com',
+    url: process.env.GPP_APP_URL || 'http://10.0.2.2:4173',
     cleartext: process.env.GPP_APP_URL?.startsWith('http://') ?? false
   }
 };

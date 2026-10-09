@@ -2,32 +2,33 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https: http://localhost:* http://127.0.0.1:* http://10.0.2.2:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.onrender.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
 <link rel="stylesheet" href="login.css">
-<script src="theme.js"></script>
 <title>GitHub Project Pusher — Login</title>
 </head>
 <body>
-<div class="login-tools"><a class="tool-link" data-contact-github target="_blank" rel="noreferrer" hidden></a><a class="tool-link" data-contact-email hidden></a><button class="tool-link" data-open-feedback>Feedback</button><button class="tool-link" data-open-contribute>Contribute</button><label>Theme<select data-theme-select aria-label="Theme"><option value="system">System</option><option value="dark">Dark</option><option value="light">Light</option></select></label></div>
-<main>
-  <h1>GitHub Project Pusher</h1>
-  <p id="status" class="muted">Preparing secure GitHub login…</p>
-  <div id="setup" class="hidden">
-    <p class="muted">GitHub Pages hosts the frontend separately from the free backend. Enter your backend URL once.</p>
-    <input id="appUrl" class="url" placeholder="https://your-app.onrender.com" autocomplete="url">
-    <div class="row">
-      <button id="go">Continue with GitHub</button>
-      <button id="local" class="secondary">Use local server</button>
+<div class="login-glow login-glow-a" aria-hidden="true"></div><div class="login-glow login-glow-b" aria-hidden="true"></div>
+<main class="login-card">
+  <a class="login-brand" href="./index.html" aria-label="Back to GitHub Project Pusher"><span class="login-mark" aria-hidden="true">↗</span><span><strong>GitHub Project Pusher</strong><small>Your code, one workspace.</small></span></a>
+  <div class="login-content">
+    <div class="eyebrow"><span class="eyebrow-dot"></span>SECURE ACCOUNT ACCESS</div>
+    <h1>Welcome back<span>.</span></h1>
+    <p class="intro">Connect your GitHub account to pick up right where your projects left off.</p>
+    <div class="status-panel"><span class="status-icon">↗</span><p id="status" class="status-text">Preparing secure GitHub login…</p></div>
+    <div id="setup" class="hidden setup-panel">
+      <p class="muted">This frontend and your backend are hosted separately. Enter your backend URL once to continue.</p>
+      <label for="appUrl">Backend URL</label>
+      <input id="appUrl" class="url" placeholder="https://your-app.onrender.com" autocomplete="url" inputmode="url">
+      <div class="row"><button id="go" type="button">Continue with GitHub <span>→</span></button><button id="local" class="secondary" type="button">Use local server</button></div>
+      <p class="hint muted">Local server default: http://127.0.0.1:4173</p>
+      <p id="error" class="error" role="alert"></p>
     </div>
-    <p class="hint muted">Local server default: http://127.0.0.1:4173</p>
-    <p id="error" class="error"></p>
   </div>
+  <div class="login-footer"><span class="secure-check">✓</span><span>Authorization is handled by GitHub.</span><span class="footer-divider">·</span><span>Your token stays server-side.</span></div>
 </main>
-<dialog id="feedbackDialog"><form id="feedbackForm"><h2>Send feedback</h2><label>Name<input name="name" maxlength="120"></label><label>Email<input name="email" type="email" maxlength="254"></label><label>GitHub username<input name="github" maxlength="120"></label><label class="honeypot">Website<input name="website" tabindex="-1"></label><label>Feedback<textarea name="message" rows="6" maxlength="8000" required></textarea></label><div class="form-status" role="status"></div><div class="row"><button type="button" class="secondary" data-close-dialog>Cancel</button><button type="submit">Send feedback</button></div></form></dialog>
-<dialog id="contributeDialog"><form id="contributeForm"><h2>Contribute</h2><label>Name<input name="name" maxlength="120"></label><label>Email<input name="email" type="email" maxlength="254"></label><label>GitHub username<input name="github" maxlength="120"></label><label>Contribution type<select name="type"><option>code</option><option>documentation</option><option>testing</option><option>design</option><option>security</option><option>idea</option><option>other</option></select></label><label>Title<input name="title" maxlength="200" required></label><label>Link<input name="link" type="url" maxlength="1000"></label><label class="honeypot">Website<input name="website" tabindex="-1"></label><label>Description<textarea name="description" rows="7" maxlength="8000" required></textarea></label><div class="form-status" role="status"></div><div class="row"><button type="button" class="secondary" data-close-dialog>Cancel</button><button type="submit">Submit contribution</button></div></form></dialog>
-<script src="config.js"></script><script src="feedback.js"></script>
+<script src="config.js"></script>
 <script src="login.js"></script>
 </body>
 </html>

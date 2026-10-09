@@ -26,10 +26,5 @@
     "electron": "39.0.0",
     "electron-builder": "26.0.12"
   },
-  "main": "electron/main.cjs",
-  "engines": {
-    "node": ">=22.9.0 <23",
-    "npm": ">=10 <12"
-  },
-  "packageManager": "npm@10.9.2"
+  "main": "electron/main.cjs"
 }

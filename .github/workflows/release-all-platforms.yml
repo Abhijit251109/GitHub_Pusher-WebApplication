@@ -1,0 +1,137 @@
+name: Build and publish all platforms
+on:
+  push:
+    tags:
+      - "v*"
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Build Windows MSI
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build MSI
+        shell: pwsh
+        env:
+          DEBUG: electron-builder
+        run: |
+          $maxAttempts = 2
+          for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+            Write-Host "Build attempt $attempt of $maxAttempts"
+            $buildOutput = & npm run build:windows-installer -- --x64 --publish never 2>&1
+            $buildExitCode = $LASTEXITCODE
+            $buildOutput | ForEach-Object { Write-Host $_ }
+            if ($buildExitCode -eq 0) { break }
+            $buildLog = $buildOutput -join [Environment]::NewLine
+            $retryableFailure = $buildLog -match "ERR_ELECTRON_BUILDER_CANNOT_EXECUTE|zip: not a valid zip file"
+            if (-not $retryableFailure -or $attempt -eq $maxAttempts) { exit $buildExitCode }
+            Write-Warning "Retrying after clearing electron-builder download caches."
+            $electronCache = Join-Path $env:LOCALAPPDATA "electron\Cache"
+            $builderCache = Join-Path $env:LOCALAPPDATA "electron-builder\Cache"
+            Remove-Item -LiteralPath $electronCache -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $builderCache -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath "dist" -Recurse -Force -ErrorAction SilentlyContinue
+          }
+          New-Item -ItemType Directory -Path "release-assets" -Force | Out-Null
+          Copy-Item -LiteralPath "dist/github_pusher.msi" -Destination "release-assets/GitHub-Project-Pusher-windows-x64.msi"
+      - name: Upload Windows MSI
+        uses: actions/upload-artifact@v4
+        with:
+          name: github_pusher-windows-msi
+          path: release-assets/GitHub-Project-Pusher-windows-x64.msi
+          if-no-files-found: error
+  macos:
+    name: Build macOS DMG (${{ matrix.arch }})
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build macOS DMG
+        run: npm run build:desktop -- --mac dmg --${{ matrix.arch }} --publish never
+      - name: Name macOS DMG
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp dist/*.dmg "release-assets/GitHub-Project-Pusher-macos-${{ matrix.arch }}.dmg"
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: github_pusher-macos-${{ matrix.arch }}-dmg
+          path: release-assets/GitHub-Project-Pusher-macos-${{ matrix.arch }}.dmg
+          if-no-files-found: error
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: gradle
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses
+          sdkmanager "platform-tools" "platforms;android-36" "build-tools;36.0.0"
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Build Android APK
+        run: npm run build:android
+      - name: Name Android APK
+        run: |
+          mkdir -p release-assets
+          cp android/app/build/outputs/apk/debug/app-debug.apk release-assets/GitHub-Project-Pusher-android.apk
+      - name: Upload Android APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: github_pusher-android-apk
+          path: release-assets/GitHub-Project-Pusher-android.apk
+          if-no-files-found: error
+  publish:
+    name: Publish GitHub Release
+    needs: [windows, macos, android]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download platform builds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: github_pusher-*
+          path: release-assets
+          merge-multiple: true
+      - name: Create or update GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --repo "$GH_REPO" --title "GitHub Project Pusher $GITHUB_REF_NAME" --generate-notes --verify-tag --latest
+          fi
+          gh release upload "$GITHUB_REF_NAME" release-assets/* --repo "$GH_REPO" --clobber

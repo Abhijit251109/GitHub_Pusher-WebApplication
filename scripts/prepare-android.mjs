@@ -8,11 +8,6 @@ const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
 
 function run(args) {
   console.log(`> ${npx} ${args.join(' ')}`);
-  if (process.platform === 'win32') {
-    const commandLine = [npx, ...args].map(value => `"${String(value).replaceAll('"', '""')}"`).join(' ');
-    execFileSync(commandLine, { cwd: root, stdio: 'inherit', shell: true });
-    return;
-  }
   execFileSync(npx, args, { cwd: root, stdio: 'inherit', shell: false });
 }
 

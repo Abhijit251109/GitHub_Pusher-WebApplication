@@ -3,7 +3,7 @@ services:
     name: github-project-pusher
     runtime: node
     plan: free
-    buildCommand: npm ci --omit=dev --no-audit --no-fund
+    buildCommand: npm install --no-audit --no-fund
     startCommand: npm start
     healthCheckPath: /api/health
     autoDeployTrigger: commit
@@ -29,46 +29,42 @@ services:
       - key: MAX_ARCHIVE_MB
         value: "45"
       - key: MAX_EXTRACTED_MB
-        value: "400"
+        value: "150"
       - key: MAX_ARCHIVE_ENTRIES
         value: "10000"
       - key: MAX_DECOMPRESSION_RATIO
-        value: "400.00"
+        value: "20"
       - key: MAX_SNAPSHOTS_PER_PROJECT
         value: "10"
       - key: APP_NAME
         value: GitHub Project Pusher
       - key: PUBLIC_BASE_URL
-        value: https://github-pusher-g3ac.onrender.com
+        sync: false
       - key: FRONTEND_URL
-        value: https://abhijit251109.github.io/GitHub_Pusher-WebApplication
+        sync: false
       - key: SESSION_SECRET
         sync: false
       - key: TOKEN_ENCRYPTION_KEY
         sync: false
       - key: SUPABASE_URL
-        value: https://vsrooptemnxxqolzbeze.supabase.co
+        sync: false
       - key: SUPABASE_SECRET_KEY
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: SUPABASE_STORAGE_BUCKET
         value: gpp-private
-      - key: PUBLIC_GITHUB_URL
-        value: https://github.com/abhijit251109
-      - key: PUBLIC_CONTACT_EMAIL
-        value: abhijitschool036@gmail.com
       - key: GITHUB_CLIENT_ID
         sync: false
       - key: GITHUB_CLIENT_SECRET
         sync: false
       - key: GITHUB_CALLBACK_URL
-        value: https://github-pusher-g3ac.onrender.com/auth/github/callback
+        sync: false
       - key: GITHUB_OAUTH_SCOPE
-        value: repo write:public_key offline_access
+        value: repo offline_access
       - key: GITHUB_ALLOW_SIGNUP
         value: "true"
       - key: REQUIRE_GITHUB_ALLOWLIST
         value: "true"
       - key: ALLOWED_GITHUB_USER_IDS
-        value: "220587777"
+        sync: false
