@@ -45,7 +45,7 @@ npm start
 
 Open `http://127.0.0.1:4173`.
 
-Local development uses the same Supabase-backed persistence model. Create a Supabase project, run `supabase/schema.sql`, copy `.env.example` to `.env`, and provide the values before starting the server.
+Local development uses the same Supabase-backed persistence model. Create a Supabase project, run `supabase/schema.sql`, copy `.env.example` to `.env`, and provide the values before starting the server. The server and native app configuration load `.env` automatically; keep server-only credentials out of `public/`.
 
 ## Free deployment
 

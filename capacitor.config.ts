@@ -1,12 +1,15 @@
+import 'dotenv/config';
 import type { CapacitorConfig } from '@capacitor/cli';
+
+const appUrl = process.env.GPP_APP_URL || process.env.PUBLIC_BASE_URL || 'https://github-pusher-g3ac.onrender.com';
 
 const config: CapacitorConfig = {
   appId: 'com.githubprojectpusher.app',
   appName: 'GitHub Project Pusher',
   webDir: 'public',
   server: {
-    url: process.env.GPP_APP_URL || 'http://10.0.2.2:4173',
-    cleartext: process.env.GPP_APP_URL?.startsWith('http://') ?? false
+    url: appUrl,
+    cleartext: appUrl.startsWith('http://')
   }
 };
 

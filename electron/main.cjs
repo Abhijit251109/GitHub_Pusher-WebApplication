@@ -1,7 +1,9 @@
+require('dotenv/config');
+
 const { app, BrowserWindow, shell } = require('electron');
 const path = require('path');
 
-const APP_URL = process.env.GPP_APP_URL || 'http://127.0.0.1:4173';
+const APP_URL = process.env.GPP_APP_URL || process.env.PUBLIC_BASE_URL || 'https://github-pusher-g3ac.onrender.com';
 
 function createWindow() {
   const win = new BrowserWindow({

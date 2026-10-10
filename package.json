@@ -13,18 +13,36 @@
     "prepare:android": "node scripts/prepare-android.mjs"
   },
   "dependencies": {
-    "express": "5.1.0",
-    "multer": "2.0.2",
     "@supabase/supabase-js": "2.57.4",
-    "tar": "7.5.22",
-    "helmet": "8.1.0"
+    "dotenv": "^18.0.7",
+    "express": "5.1.0",
+    "helmet": "8.1.0",
+    "multer": "^2.4.0",
+    "tar": "7.5.22"
   },
   "devDependencies": {
-    "@capacitor/cli": "8.0.0",
-    "@capacitor/android": "8.0.0",
-    "@capacitor/core": "8.0.0",
-    "electron": "39.0.0",
-    "electron-builder": "26.0.12"
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.5.0",
+    "typescript": "~5.0.2"
   },
-  "main": "electron/main.cjs"
+  "main": "electron/main.cjs",
+  "description": "A public-hostable GitHub project library with a static GitHub Pages frontend, a free Render Node backend, and persistent Supabase Postgres + private Storage.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Abhijit251109/GitHub_Pusher-WebApplication.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/Abhijit251109/GitHub_Pusher-WebApplication/issues"
+  },
+  "homepage": "https://github.com/Abhijit251109/GitHub_Pusher-WebApplication#readme",
+  "allowScripts": {
+    "electron@39.0.0": true,
+    "electron-winstaller@5.4.0": true
+  }
 }
