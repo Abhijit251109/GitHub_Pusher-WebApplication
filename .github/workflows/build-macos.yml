@@ -22,7 +22,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build macOS DMG
-        run: npm run build:desktop -- --mac dmg
+        run: npm run build:desktop -- --mac dmg --publish never
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
