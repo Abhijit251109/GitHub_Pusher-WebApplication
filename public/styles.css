@@ -292,6 +292,38 @@ input {
   cursor: not-allowed;
 }
 
+.is-loading {
+  cursor: wait !important;
+}
+
+.is-loading::before,
+.loading-message::before {
+  display: inline-block;
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  content: "";
+  animation: spin .7s linear infinite;
+}
+
+.is-loading::before {
+  margin-right: 3px;
+}
+
+.loading-message::before {
+  margin-right: 8px;
+  vertical-align: -2px;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .dot {
   display: inline-block;
   width: 9px;
