@@ -2,6 +2,9 @@ name: Build Windows MSI
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   build-msi:
@@ -22,7 +25,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build MSI
-        run: npm run build:windows-installer -- --x64
+        run: npm run build:windows-installer -- --x64 --publish never
 
       - name: Upload github_pusher.msi
         uses: actions/upload-artifact@v4

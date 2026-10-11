@@ -10,6 +10,10 @@ const config: CapacitorConfig = {
   server: {
     url: appUrl,
     cleartext: appUrl.startsWith('http://')
+  },
+  android: {
+    // Lets the hosted frontend identify the native wrapper without needing a JS bundler.
+    appendUserAgent: 'GitHubProjectPusherAndroid'
   }
 };
 

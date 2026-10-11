@@ -1,0 +1,22 @@
+appId: com.githubprojectpusher.app
+productName: GitHub Project Pusher
+files:
+  - electron/**
+mac:
+  target: dmg
+  protocols:
+    - name: GitHub Project Pusher OAuth
+      schemes:
+        - com.githubprojectpusher.app
+win:
+  target:
+    - msi
+    - nsis
+  artifactName: github_pusher.${ext}
+linux:
+  target: AppImage
+  # On Linux, the desktop entry must advertise the URI scheme so desktop
+  # environments can route com.githubprojectpusher.app:// links to the app.
+  desktop:
+    entry:
+      MimeType: "x-scheme-handler/com.githubprojectpusher.app;"

@@ -2,31 +2,26 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.onrender.com; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
 <link rel="stylesheet" href="login.css">
 <title>GitHub Project Pusher — Login</title>
 </head>
 <body>
-<div class="login-glow login-glow-a" aria-hidden="true"></div><div class="login-glow login-glow-b" aria-hidden="true"></div>
-<main class="login-card">
-  <a class="login-brand" href="./index.html" aria-label="Back to GitHub Project Pusher"><span class="login-mark" aria-hidden="true">↗</span><span><strong>GitHub Project Pusher</strong><small>Your code, one workspace.</small></span></a>
-  <div class="login-content">
-    <div class="eyebrow"><span class="eyebrow-dot"></span>SECURE ACCOUNT ACCESS</div>
-    <h1>Welcome back<span>.</span></h1>
-    <p class="intro">Connect your GitHub account to pick up right where your projects left off.</p>
-    <div class="status-panel"><span class="status-icon">↗</span><p id="status" class="status-text">Preparing secure GitHub login…</p></div>
-    <div id="setup" class="hidden setup-panel">
-      <p class="muted">This frontend and your backend are hosted separately. Enter your backend URL once to continue.</p>
-      <label for="appUrl">Backend URL</label>
-      <input id="appUrl" class="url" placeholder="https://your-app.onrender.com" autocomplete="url" inputmode="url">
-      <div class="row"><button id="go" type="button">Continue with GitHub <span>→</span></button><button id="local" class="secondary" type="button">Use local server</button></div>
-      <p class="hint muted">Local server default: http://127.0.0.1:4173</p>
-      <p id="error" class="error" role="alert"></p>
+<main>
+  <h1>GitHub Project Pusher</h1>
+  <p id="status" class="muted">Preparing secure GitHub login…</p>
+  <div id="setup" class="hidden">
+    <p class="muted">GitHub Pages hosts the frontend separately from the free backend. Enter your backend URL once.</p>
+    <input id="appUrl" class="url" placeholder="https://your-app.onrender.com" autocomplete="url">
+    <div class="row">
+      <button id="go">Continue with GitHub</button>
+      <button id="local" class="secondary">Use local server</button>
     </div>
+    <p class="hint muted">Local server default: http://127.0.0.1:4173</p>
+    <p id="error" class="error"></p>
   </div>
-  <div class="login-footer"><span class="secure-check">✓</span><span>Authorization is handled by GitHub.</span><span class="footer-divider">·</span><span>Your token stays server-side.</span></div>
 </main>
 <script src="config.js"></script>
 <script src="login.js"></script>

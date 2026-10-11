@@ -1,4 +1,3 @@
-import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
 import fs from 'fs/promises';
@@ -8,7 +7,7 @@ import crypto from 'crypto';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
-import * as tar from 'tar';
+import tar from 'tar';
 import helmet from 'helmet';
 
 const execFileAsync = promisify(execFile);
@@ -41,6 +40,9 @@ const SYNC_MS = Number(process.env.SYNC_INTERVAL_MS || 30000);
 const APP_NAME = process.env.APP_NAME || 'GitHub Project Pusher';
 const SESSION_COOKIE = 'gpp_session';
 const OAUTH_BINDING_COOKIE = 'gpp_oauth_pre';
+// Shared custom URI scheme for Android and Electron desktop OAuth handoff.
+const NATIVE_OAUTH_REDIRECT_URI = 'com.githubprojectpusher.app://auth/callback';
+const NATIVE_OAUTH_NONCE_PATTERN = /^[A-Za-z0-9_-]{32,128}$/;
 const isProd = process.env.NODE_ENV === 'production';
 const STORAGE_BUCKET = process.env.SUPABASE_STORAGE_BUCKET || 'gpp-private';
 const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
@@ -51,43 +53,14 @@ const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
 if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
 
-const SUPABASE_SERVER_KEYS = [...new Set([
-  process.env.SUPABASE_SECRET_KEY,
-  process.env.SUPABASE_SERVICE_ROLE_KEY
-].map(key => String(key || '').trim()).filter(Boolean))];
-const SUPABASE_SERVER_KEY = SUPABASE_SERVER_KEYS[0];
+const SUPABASE_SERVER_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const hasSupabase = Boolean(process.env.SUPABASE_URL && SUPABASE_SERVER_KEY);
-
-function supabaseFetchWithKeyFallback(keys) {
-  return async (input, init) => {
-    const request = new Request(input, init);
-    let response = await fetch(request.clone());
-    if (response.status !== 401 || !/unregistered api key/i.test(await response.clone().text())) {
-      return response;
-    }
-
-    for (const fallbackKey of keys.slice(1)) {
-      const headers = new Headers(request.headers);
-      headers.set('apikey', fallbackKey);
-      headers.set('authorization', 'Bearer ' + fallbackKey);
-      response = await fetch(new Request(request.clone(), { headers }));
-      if (response.status !== 401 || !/unregistered api key/i.test(await response.clone().text())) {
-        return response;
-      }
-    }
-    return response;
-  };
-}
-
 if (isProd && !hasSupabase) {
   throw new Error('Persistent storage is required in production. Set SUPABASE_URL and SUPABASE_SECRET_KEY.');
 }
 
 const supabase = hasSupabase
-  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, {
-      auth: { autoRefreshToken: false, persistSession: false },
-      global: { fetch: supabaseFetchWithKeyFallback(SUPABASE_SERVER_KEYS) }
-    })
+  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, { auth: { autoRefreshToken: false, persistSession: false } })
   : null;
 
 await fs.mkdir(UPLOAD_TEMP, { recursive: true });
@@ -122,7 +95,7 @@ app.use(helmet({
       scriptSrc: ["'self'"],
       styleSrc: ["'self'"],
       imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'", 'https://api.github.com', ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
+      connectSrc: ["'self'", ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
@@ -221,6 +194,15 @@ function cookieOptions() {
 function oauthBindingCookieOptions(maxAgeSeconds = Math.ceil(OAUTH_ATTEMPT_TTL_MS / 1000)) {
   const secure = isProd || process.env.COOKIE_SECURE === 'true';
   return `Path=/; HttpOnly; SameSite=Lax; Max-Age=${maxAgeSeconds}${secure ? '; Secure' : ''}`;
+}
+function isNativeOAuthReturnTo(value) {
+  try {
+    const target = new URL(String(value || ''));
+    return target.protocol === 'com.githubprojectpusher.app:'
+      && target.hostname === 'auth'
+      && target.pathname === '/callback'
+      && NATIVE_OAUTH_NONCE_PATTERN.test(target.searchParams.get('nonce') || '');
+  } catch { return false; }
 }
 function clearOAuthBindingCookie() {
   return `${OAUTH_BINDING_COOKIE}=; ${oauthBindingCookieOptions(0)}`;
@@ -358,7 +340,10 @@ async function consumeOAuthAttempt(state, browserBinding) {
   if (!row) return null;
   await queryOne('oauth_attempts', supabase.from('oauth_attempts').delete().eq('state_hash', hashSecret(state)));
   if (new Date(row.expires_at).getTime() < Date.now()) return null;
-  if (!browserBinding || !row.client_cookie_hash || hashSecret(browserBinding) !== row.client_cookie_hash) return null;
+  // Native clients return through a registered URI rather than the system browser's cookie jar.
+  // State + PKCE remain mandatory; the browser-binding cookie remains required for web attempts.
+  const isNativeAttempt = isNativeOAuthReturnTo(row.return_to);
+  if (!isNativeAttempt && (!browserBinding || !row.client_cookie_hash || hashSecret(browserBinding) !== row.client_cookie_hash)) return null;
   return row;
 }
 async function createLoginCode(userId) {
@@ -674,8 +659,21 @@ app.get('/api/auth/login', async (req, res) => {
   try {
     if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
     supabaseRequired();
-    const returnTo = allowedReturnTo(req.query.return_to, req);
-    if (req.query.return_to && !returnTo) return res.status(400).send('Invalid return URL.');
+    const nativeClient = String(req.query.client || '').toLowerCase();
+    const isNativeClient = nativeClient === 'android' || nativeClient === 'desktop';
+    let returnTo;
+    if (isNativeClient) {
+      const mobileNonce = String(req.query.mobile_nonce || '');
+      if (!NATIVE_OAUTH_NONCE_PATTERN.test(mobileNonce)) {
+        return res.status(400).send('Missing or invalid native login nonce. Please retry sign-in from the installed app.');
+      }
+      const nativeTarget = new URL(NATIVE_OAUTH_REDIRECT_URI);
+      nativeTarget.searchParams.set('nonce', mobileNonce);
+      returnTo = nativeTarget.toString();
+    } else {
+      returnTo = allowedReturnTo(req.query.return_to, req);
+      if (req.query.return_to && !returnTo) return res.status(400).send('Invalid return URL.');
+    }
     const state = randomToken(24);
     const codeVerifier = randomToken(32);
     const browserBinding = randomToken(24);
@@ -694,6 +692,7 @@ app.get('/api/auth/login', async (req, res) => {
     res.redirect(u.toString());
   } catch (e) { res.status(500).send(`GitHub sign-in setup failed: ${e.message}`); }
 });
+
 app.get('/auth/github/callback', async (req, res) => {
   try {
     supabaseRequired();

@@ -77,10 +77,3 @@ Supabase project URL configured for this build:
 `https://vsrooptemnxxqolzbeze.supabase.co`
 
 The Supabase publishable key is safe for the browser bundle; the Supabase secret key remains backend-only in `.env`/Render environment variables.
-
-
-## 9. Native application builds
-
-Use the Actions tab to run the manual Android APK build. A version tag such as `v3.0.0` runs the cross-platform release workflow and publishes Windows, Intel/Apple Silicon macOS, and Android packages to GitHub Releases. The public website lists supported installers from the latest release.
-
-The Android APK is a debug-signed sideloading build, not a Play Store release. Desktop builds are not publisher-signed and may trigger standard platform security prompts.

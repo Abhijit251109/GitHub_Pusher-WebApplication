@@ -2,6 +2,9 @@ name: Build macOS App
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
 
 jobs:
   build-macos:
@@ -22,7 +25,7 @@ jobs:
         run: npm install --no-audit --no-fund
 
       - name: Build macOS DMG
-        run: npm run build:desktop -- --mac dmg --publish never
+        run: npm run build:desktop -- --mac dmg
 
       - name: Upload macOS DMG
         uses: actions/upload-artifact@v4
