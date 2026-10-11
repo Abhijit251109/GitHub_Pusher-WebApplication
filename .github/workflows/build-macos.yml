@@ -3,6 +3,16 @@ name: Build macOS App
 on:
   workflow_dispatch:
   push:
+    branches:
+      - master
+    paths:
+      - '.github/workflows/build-macos.yml'
+      - 'capacitor.config.ts'
+      - 'electron/**'
+      - 'electron-builder.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'public/icons/**'
     tags:
       - 'v*'
 
