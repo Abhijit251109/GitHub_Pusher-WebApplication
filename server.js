@@ -885,7 +885,15 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
     await withProjectLock(project.id, async () => {
       let repo;
       if (repoId) repo = await githubFetch(`https://api.github.com/repositories/${repoId}`, { headers: githubHeaders(token) });
-      else repo = await githubFetch('https://api.github.com/user/repos', { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ name: normalizeName(repoName || project.name), private: visibility !== 'public', auto_init: false }) });
+      else {
+        const repoNameNorm = normalizeName(repoName || project.name);
+        // Check if the repo already exists before trying to create it
+        try {
+          repo = await githubFetch(`https://api.github.com/repos/${(await githubFetch('https://api.github.com/user', { headers: githubHeaders(token) })).login}/${repoNameNorm}`, { headers: githubHeaders(token) });
+        } catch {
+          repo = await githubFetch('https://api.github.com/user/repos', { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ name: repoNameNorm, private: visibility !== 'public', auto_init: false }) });
+        }
+      }
       let updatedProject = { ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch };
       await withWorkspace(project, async dir => {
         await snapshotProject(updatedProject, dir, 'before-push');
