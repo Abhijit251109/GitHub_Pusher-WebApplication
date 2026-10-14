@@ -618,6 +618,25 @@ select:focus {
   border-bottom-color: var(--accent);
 }
 
+.change-source {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 600;
+  margin-right: 6px;
+}
+.change-source.local {
+  background: rgba(52, 211, 153, .15);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, .25);
+}
+.change-source.github {
+  background: rgba(167, 139, 250, .15);
+  color: #a78bfa;
+  border: 1px solid rgba(167, 139, 250, .25);
+}
+
 .auth {
   display: flex;
   max-width: 680px;

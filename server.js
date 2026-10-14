@@ -235,7 +235,8 @@ function projectFromRow(row) {
     syncState: row.sync_state, syncMessage: row.sync_message, repoId: row.repo_id, repoFullName: row.repo_full_name,
     repoUrl: row.repo_url, remoteUrl: row.remote_url, branch: row.branch, lastPushedAt: row.last_pushed_at,
     lastPushedCommit: row.last_pushed_commit, lastSyncAt: row.last_sync_at, lastPulledCommit: row.last_pulled_commit,
-    lastCheckedAt: row.last_checked_at, fileCount: row.file_count || 0, storagePath: row.storage_path
+    lastCheckedAt: row.last_checked_at, fileCount: row.file_count || 0, storagePath: row.storage_path,
+    lastLocalChangeAt: row.last_local_change_at, lastGithubChangeAt: row.last_github_change_at
   };
 }
 function projectToRow(p) {
@@ -245,7 +246,8 @@ function projectToRow(p) {
     repo_full_name: p.repoFullName || null, repo_url: p.repoUrl || null, remote_url: p.remoteUrl || null,
     branch: p.branch || null, last_pushed_at: p.lastPushedAt || null, last_pushed_commit: p.lastPushedCommit || null,
     last_sync_at: p.lastSyncAt || null, last_pulled_commit: p.lastPulledCommit || null,
-    last_checked_at: p.lastCheckedAt || null, file_count: Number(p.fileCount || 0), storage_path: p.storagePath || null
+    last_checked_at: p.lastCheckedAt || null, file_count: Number(p.fileCount || 0), storage_path: p.storagePath || null,
+    last_local_change_at: p.lastLocalChangeAt || null, last_github_change_at: p.lastGithubChangeAt || null
   };
 }
 
@@ -873,6 +875,22 @@ app.get('/api/github/repos', async (req, res) => {
     res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
+app.post('/api/github/fetch', ensureRequestProtection, async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  const { projectId } = req.body || {};
+  if (!projectId) return res.status(400).json({ error: 'Select a project.' });
+  try {
+    const project = await dbGetProject(projectId);
+    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
+    if (!project.repoFullName || !project.branch) return res.status(400).json({ error: 'Project is not connected to a GitHub repository.' });
+    await syncProjectForUser(a.user, project);
+    const updated = await dbGetProject(projectId);
+    res.json({ ok: true, project: { ...updated, files: updated.fileCount } });
+  } catch (e) {
+    const errorMsg = e.stderr || e.stdout || e.message || 'Fetch failed.';
+    res.status(500).json({ error: errorMsg });
+  }
+});
 app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
   res.setTimeout(600000); // 10 minutes for large project pushes
   const a = await authUser(req, res); if (!a) return;
@@ -903,7 +921,14 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
           const remoteBranch = repo.default_branch || branch;
           const remoteRef = await rev(dir, `origin/${remoteBranch}`);
           const head = await rev(dir, 'HEAD');
-          if (remoteRef && !head) throw new Error('Selected repository already has history. Use a fresh repository or pull/merge it first.');
+          // If remote has history, pull it first to merge with local files
+          if (remoteRef && !head) {
+            await runGit(dir, ['branch', '-M', branch], env);
+            await runGit(dir, ['pull', '-f', '--allow-unrelated-histories', 'origin', remoteBranch, '--no-edit'], env).catch(() => {
+              // If pull fails, reset to remote
+              return runGit(dir, ['reset', '--hard', 'origin/' + remoteBranch], env);
+            });
+          }
           await runGit(dir, ['add', '-A'], env);
           let changes = true;
           try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
@@ -918,7 +943,7 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         const commit = await rev(dir, 'HEAD');
         await snapshotProject(updatedProject, dir, 'after-push');
         const persisted = await persistWorkingTree(updatedProject, dir);
-        updatedProject = { ...updatedProject, storagePath: persisted.storagePath, fileCount: await countFiles(dir), lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage: 'Push completed.' };
+        updatedProject = { ...updatedProject, storagePath: persisted.storagePath, fileCount: await countFiles(dir), lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage: 'Push completed.', lastLocalChangeAt: nowIso() };
       });
       await dbUpsertProject(updatedProject);
       project.lastPushedAt = updatedProject.lastPushedAt;
@@ -947,7 +972,7 @@ async function syncProjectForUser(user, project) {
         const remote = await rev(dir, `origin/${project.branch}`);
         if (!remote || remote === before) return;
         if (dirty) {
-          await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: 'Remote changes detected but local edits were left untouched.', lastCheckedAt: nowIso() });
+          await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: 'Remote changes detected but local edits were left untouched.', lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
           broadcast(user.id, { type: 'sync-conflict', projectId: project.id });
           return;
         }
@@ -956,7 +981,7 @@ async function syncProjectForUser(user, project) {
         const after = await rev(dir, 'HEAD');
         await snapshotProject(project, dir, 'after-pull');
         const persisted = await persistWorkingTree(project, dir);
-        await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: await countFiles(dir), syncState: 'synced', syncMessage: 'Remote changes pulled automatically.', lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso() });
+        await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: await countFiles(dir), syncState: 'synced', syncMessage: 'Remote changes pulled automatically.', lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
         broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
       } catch (e) {
         await updateProject(project.id, user.id, { syncState: 'error', syncMessage: e.stderr || e.message, lastCheckedAt: nowIso() }).catch(() => {});

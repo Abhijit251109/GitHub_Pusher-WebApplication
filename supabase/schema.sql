@@ -69,8 +69,13 @@ create table if not exists public.projects (
   last_pulled_commit text,
   last_checked_at timestamptz,
   file_count integer not null default 0,
-  storage_path text
+  storage_path text,
+  last_local_change_at timestamptz,
+  last_github_change_at timestamptz
 );
+-- Add change tracking columns if they don't exist yet (for existing databases)
+alter table public.projects add column if not exists last_local_change_at timestamptz;
+alter table public.projects add column if not exists last_github_change_at timestamptz;
 create index if not exists projects_user_id_idx on public.projects(user_id);
 
 create table if not exists public.snapshots (
