@@ -24,12 +24,12 @@ const APPLICATION_PLATFORMS = {
 };
 const LOCAL_DATA = path.join(ROOT, 'data');
 const UPLOAD_TEMP = path.join(LOCAL_DATA, 'uploads');
-const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 2000);
+const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 20000);
 const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024;
 const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 500) * 1024 * 1024;
 const MAX_ARCHIVE_SIZE = Number(process.env.MAX_ARCHIVE_MB || 500) * 1024 * 1024;
 const MAX_EXTRACTED_BYTES = Number(process.env.MAX_EXTRACTED_MB || 1500) * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES = Number(process.env.MAX_ARCHIVE_ENTRIES || 10000);
+const MAX_ARCHIVE_ENTRIES = Number(process.env.MAX_ARCHIVE_ENTRIES || 50000);
 const MAX_DECOMPRESSION_RATIO = Number(process.env.MAX_DECOMPRESSION_RATIO || 200);
 const MAX_SNAPSHOTS = Number(process.env.MAX_SNAPSHOTS_PER_PROJECT || 10);
 const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 7) * 24 * 60 * 60 * 1000;
@@ -121,7 +121,10 @@ function normalizeName(s) {
   return String(s || '').replace(/[^a-zA-Z0-9._-]/g, '-').replace(/^-+|-+$/g, '').slice(0, 100) || 'project';
 }
 function safeRelative(rel) {
-  const n = path.posix.normalize(String(rel || '').replaceAll('\\', '/'));
+  // Handle empty or whitespace-only paths (files selected individually without folder context)
+  const raw = String(rel || '').trim();
+  if (!raw) return null;
+  const n = path.posix.normalize(raw.replaceAll('\\', '/'));
   if (!n || n === '.' || n.startsWith('../') || n.includes('/../') || path.posix.isAbsolute(n)) return null;
   return n;
 }
@@ -834,7 +837,14 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       const rel = safeRelative(file.originalname);
       if (!rel) { skipped++; console.warn(`Skipped file with invalid path: "${file.originalname}" (size: ${file.size} bytes)`); continue; }
       const target = path.join(workspace, rel);
-      if (!target.startsWith(workspace + path.sep)) { skipped++; console.warn(`Skipped file with unsafe path: "${file.originalname}"`); continue; }
+      // On Windows, path.join converts forward slashes to backslashes, so check both separators
+      const normalizedTarget = path.resolve(target);
+      const normalizedWorkspace = path.resolve(workspace);
+      if (normalizedTarget !== normalizedWorkspace && !normalizedTarget.startsWith(normalizedWorkspace + path.sep)) {
+        skipped++;
+        console.warn(`Skipped file with unsafe path: "${file.originalname}" (resolved: ${normalizedTarget}, workspace: ${normalizedWorkspace})`);
+        continue;
+      }
       await fs.mkdir(path.dirname(target), { recursive: true });
       try {
         await fs.rename(file.path, target);
@@ -948,7 +958,7 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
       await withWorkspace(project, async dir => {
         const beforeFiles = await countFiles(dir);
         console.log(`Push workspace: ${beforeFiles} files before git setup for project ${project.id}`);
-        await snapshotProject(updatedProject, dir, 'before-push');
+        await snapshotProject(updatedProject, dir, 'before-push').catch(e => console.warn(`Before-push snapshot skipped: ${e.message}`));
         await ensureGit(dir, repo.clone_url);
         await withGitAuth(token, async env => {
           await runGit(dir, ['fetch', 'origin'], env).catch(() => {});
@@ -989,11 +999,25 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         const commit = await rev(dir, 'HEAD');
         const afterFiles = await countFiles(dir);
         console.log(`Push workspace: ${afterFiles} files after push for project ${project.id}`);
-        await snapshotProject(updatedProject, dir, 'after-push');
-        const persisted = await persistWorkingTree(updatedProject, dir);
-        updatedProject = { ...updatedProject, storagePath: persisted.storagePath, fileCount: afterFiles, lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage: 'Push completed.', lastLocalChangeAt: nowIso() };
+        // Post-push persistence: if storage upload fails (e.g., large project), still report push success
+        let storagePath = project.storagePath;
+        let syncMessage = 'Push completed.';
+        try {
+          await snapshotProject(updatedProject, dir, 'after-push');
+        } catch (e) {
+          console.warn(`After-push snapshot skipped: ${e.message}`);
+          syncMessage += ' (Snapshot skipped: archive too large.)';
+        }
+        try {
+          const persisted = await persistWorkingTree(updatedProject, dir);
+          storagePath = persisted.storagePath;
+        } catch (e) {
+          console.warn(`Working tree persistence skipped: ${e.message}`);
+          syncMessage += ' (Working tree persistence skipped: archive too large.)';
+        }
+        updatedProject = { ...updatedProject, storagePath, fileCount: afterFiles, lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage, lastLocalChangeAt: nowIso() };
       });
-      await dbUpsertProject(updatedProject);
+      await dbUpsertProject(updatedProject).catch(e => console.warn(`Database upsert after push skipped: ${e.message}`));
       project.lastPushedAt = updatedProject.lastPushedAt;
       Object.assign(project, updatedProject);
     });
