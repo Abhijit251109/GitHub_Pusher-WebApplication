@@ -25,10 +25,10 @@ const APPLICATION_PLATFORMS = {
 const LOCAL_DATA = path.join(ROOT, 'data');
 const UPLOAD_TEMP = path.join(LOCAL_DATA, 'uploads');
 const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 2000);
-const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 50) * 1024 * 1024;
-const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 40) * 1024 * 1024;
-const MAX_ARCHIVE_SIZE = Number(process.env.MAX_ARCHIVE_MB || 45) * 1024 * 1024;
-const MAX_EXTRACTED_BYTES = Number(process.env.MAX_EXTRACTED_MB || 150) * 1024 * 1024;
+const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024;
+const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 500) * 1024 * 1024;
+const MAX_ARCHIVE_SIZE = Number(process.env.MAX_ARCHIVE_MB || 500) * 1024 * 1024;
+const MAX_EXTRACTED_BYTES = Number(process.env.MAX_EXTRACTED_MB || 1500) * 1024 * 1024;
 const MAX_ARCHIVE_ENTRIES = Number(process.env.MAX_ARCHIVE_ENTRIES || 10000);
 const MAX_DECOMPRESSION_RATIO = Number(process.env.MAX_DECOMPRESSION_RATIO || 20);
 const MAX_SNAPSHOTS = Number(process.env.MAX_SNAPSHOTS_PER_PROJECT || 10);
@@ -108,7 +108,7 @@ app.use(helmet({
   hsts: isProd ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false
 }));
 
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: false }));
 app.use(express.static(path.join(ROOT, 'public')));
 
@@ -811,7 +811,14 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       const target = path.join(workspace, rel);
       if (!target.startsWith(workspace + path.sep)) continue;
       await fs.mkdir(path.dirname(target), { recursive: true });
-      await fs.rename(file.path, target);
+      try {
+        await fs.rename(file.path, target);
+      } catch (e) {
+        if (e.code === 'EXDEV') {
+          await fs.copyFile(file.path, target);
+          await fs.rm(file.path, { force: true });
+        } else throw e;
+      }
     }
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
@@ -867,6 +874,7 @@ app.get('/api/github/repos', async (req, res) => {
   } catch (e) { res.status(502).json({ error: e.message }); }
 });
 app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
+  res.setTimeout(600000); // 10 minutes for large project pushes
   const a = await authUser(req, res); if (!a) return;
   const { projectId, repoId, repoName, visibility = 'private', branch = 'main' } = req.body || {};
   if (!projectId) return res.status(400).json({ error: 'Select a project.' });
