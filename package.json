@@ -10,7 +10,8 @@
     "build:desktop": "electron-builder --config electron-builder.yml",
     "build:windows-installer": "electron-builder --config electron-builder.yml --win msi",
     "build:android": "node scripts/build-android.mjs",
-    "prepare:android": "node scripts/prepare-android.mjs"
+    "prepare:android": "node scripts/prepare-android.mjs",
+    "test:syntax": "node --check server.js && node --check public/app.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.57.4",

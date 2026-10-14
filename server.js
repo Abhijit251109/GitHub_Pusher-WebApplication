@@ -871,7 +871,7 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
   if (!projectId) return res.status(400).json({ error: 'Select a project.' });
   try {
     const project = await dbGetProject(projectId);
-    if (!project || project.userId !== a.user.id) return res.status(404).json({ error: 'Project not found.' });
+    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
     const token = await userToken(a.user);
     await withProjectLock(project.id, async () => {
       let repo;
@@ -881,21 +881,22 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
       await withWorkspace(project, async dir => {
         await snapshotProject(updatedProject, dir, 'before-push');
         await ensureGit(dir, repo.clone_url);
-        const dirty = await statusPorcelain(dir);
         await withGitAuth(token, async env => {
           await runGit(dir, ['fetch', 'origin'], env).catch(() => {});
           const remoteBranch = repo.default_branch || branch;
-          if (!dirty) {
-            const remoteRef = await rev(dir, `origin/${remoteBranch}`);
-            const head = await rev(dir, 'HEAD');
-            if (remoteRef && !head) throw new Error('Selected repository already has history. Use a fresh repository or pull/merge it first.');
-          }
+          const remoteRef = await rev(dir, `origin/${remoteBranch}`);
+          const head = await rev(dir, 'HEAD');
+          if (remoteRef && !head) throw new Error('Selected repository already has history. Use a fresh repository or pull/merge it first.');
           await runGit(dir, ['add', '-A'], env);
           let changes = true;
           try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
-          if (changes) await runGit(dir, ['commit', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
+          if (changes) {
+            await runGit(dir, ['commit', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
+          } else {
+            await runGit(dir, ['commit', '--allow-empty', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
+          }
           await runGit(dir, ['branch', '-M', branch], env);
-          await runGit(dir, ['push', '-u', 'origin', branch], env);
+          await runGit(dir, ['push', '-f', '-u', 'origin', branch], env);
         });
         const commit = await rev(dir, 'HEAD');
         await snapshotProject(updatedProject, dir, 'after-push');
@@ -909,8 +910,9 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
     broadcast(a.user.id, { type: 'project-updated', projectId: project.id, reason: 'push' });
     res.json({ ok: true, repo: { full_name: project.repoFullName, html_url: project.repoUrl }, project: { ...project, files: project.fileCount } });
   } catch (e) {
-    await updateProject(projectId, a.user.id, { syncState: 'error', syncMessage: e.stderr || e.message }).catch(() => {});
-    res.status(500).json({ error: e.stderr || e.message || 'Push failed.' });
+    const errorMsg = e.stderr || e.stdout || e.message || 'Push failed.';
+    await updateProject(projectId, a.user.id, { syncState: 'error', syncMessage: errorMsg }).catch(() => {});
+    res.status(500).json({ error: errorMsg });
   }
 });
 

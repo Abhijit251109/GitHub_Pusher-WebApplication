@@ -7,9 +7,9 @@ workspace/
 !.env.example
 dist/
 release/
-application/macos/GitHub-Project-Pusher-macos-arm64.zip
 .DS_Store
 .idea/
+.junie/
 # Backend secrets / local environment
 .env
 .env.*
