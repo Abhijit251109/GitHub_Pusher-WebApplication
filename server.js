@@ -484,7 +484,8 @@ async function withWorkspace(project, fn) {
 async function persistWorkingTree(project, work) {
   const archive = path.join(os.tmpdir(), `gpp-working-${crypto.randomUUID()}.tgz`);
   try {
-    await createArchive(work, archive, true);
+    // Exclude .git from the archive — it will be recreated by ensureGit on next workspace load
+    await createArchive(work, archive, false);
     const buf = await fs.readFile(archive);
     const objectPath = project.storagePath || `projects/${project.userId}/${project.id}/working.tgz`;
     await storageUpload(objectPath, buf, 'application/gzip');
@@ -831,9 +832,9 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       total += Number(file.size || 0);
       if (total > MAX_TOTAL_UPLOAD) throw new Error(`Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`);
       const rel = safeRelative(file.originalname);
-      if (!rel) { skipped++; console.warn('Skipped file with invalid path:', file.originalname); continue; }
+      if (!rel) { skipped++; console.warn(`Skipped file with invalid path: "${file.originalname}" (size: ${file.size} bytes)`); continue; }
       const target = path.join(workspace, rel);
-      if (!target.startsWith(workspace + path.sep)) { skipped++; console.warn('Skipped file with unsafe path:', file.originalname); continue; }
+      if (!target.startsWith(workspace + path.sep)) { skipped++; console.warn(`Skipped file with unsafe path: "${file.originalname}"`); continue; }
       await fs.mkdir(path.dirname(target), { recursive: true });
       try {
         await fs.rename(file.path, target);
@@ -845,10 +846,12 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       }
     }
     if (skipped > 0) console.warn(`Upload skipped ${skipped} file(s) out of ${files.length} total.`);
+    const uploadedCount = await countFiles(workspace);
+    console.log(`Upload complete: ${uploadedCount} files in workspace out of ${files.length} uploaded for project "${req.body.projectName || 'unnamed'}"`);
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
     const name = normalizeName(req.body.projectName || first.split(/[\\/]/)[0]);
-    const project = { id, userId: a.user.id, name, createdAt: nowIso(), updatedAt: nowIso(), syncState: 'local', syncMessage: 'Stored in persistent cloud storage.', fileCount: await countFiles(workspace), storagePath: `projects/${a.user.id}/${id}/working.tgz` };
+    const project = { id, userId: a.user.id, name, createdAt: nowIso(), updatedAt: nowIso(), syncState: 'local', syncMessage: 'Stored in persistent cloud storage.', fileCount: uploadedCount, storagePath: `projects/${a.user.id}/${id}/working.tgz` };
     await withProjectLock(id, async () => { await persistWorkingTree(project, workspace); await dbUpsertProject(project); });
     broadcast(a.user.id, { type: 'projects-changed', projectId: id });
     res.json({ ...project, files: project.fileCount });
@@ -943,6 +946,8 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
       }
       let updatedProject = { ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch };
       await withWorkspace(project, async dir => {
+        const beforeFiles = await countFiles(dir);
+        console.log(`Push workspace: ${beforeFiles} files before git setup for project ${project.id}`);
         await snapshotProject(updatedProject, dir, 'before-push');
         await ensureGit(dir, repo.clone_url);
         await withGitAuth(token, async env => {
@@ -950,22 +955,27 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
           const remoteBranch = repo.default_branch || branch;
           const remoteRef = await rev(dir, `origin/${remoteBranch}`);
           const head = await rev(dir, 'HEAD');
-          // If remote has history, merge it with local files to preserve both
-          if (remoteRef && !head) {
-            await runGit(dir, ['branch', '-M', branch], env);
-            // Stage local files first so they're preserved during merge
-            await runGit(dir, ['add', '-A'], env);
-            await runGit(dir, ['commit', '-m', `Local files from ${APP_NAME} ${nowIso()}`], env).catch(() => {});
-            // Try to merge remote history with local files
-            try {
-              await runGit(dir, ['pull', '--allow-unrelated-histories', 'origin', remoteBranch, '--no-edit'], env);
-            } catch {
-              // If merge conflicts, keep local files and overwrite remote
-              await runGit(dir, ['checkout', '--ours', '--', '.'], env).catch(() => {});
-              await runGit(dir, ['add', '-A'], env);
-              await runGit(dir, ['commit', '-m', `Resolve merge: keep local files ${nowIso()}`], env).catch(() => {});
+          await runGit(dir, ['branch', '-M', branch], env);
+          // Always pull remote changes first to ensure remote files are in the workspace
+          if (remoteRef) {
+            if (!head) {
+              // No local commit yet: checkout remote branch, then overlay local files
+              await runGit(dir, ['checkout', '-b', branch, 'origin/' + remoteBranch], env).catch(() => {
+                return runGit(dir, ['reset', '--hard', 'origin/' + remoteBranch], env);
+              });
+            } else {
+              // Both local and remote exist: merge remote into local, keeping local files on conflict
+              try {
+                await runGit(dir, ['pull', '--allow-unrelated-histories', 'origin', remoteBranch, '--no-edit'], env);
+              } catch {
+                // Merge conflict: keep local files
+                await runGit(dir, ['checkout', '--ours', '--', '.'], env).catch(() => {});
+                await runGit(dir, ['add', '-A'], env);
+                await runGit(dir, ['commit', '-m', `Resolve merge: keep local files ${nowIso()}`], env).catch(() => {});
+              }
             }
           }
+          // Stage all files (including any newly pulled remote files)
           await runGit(dir, ['add', '-A'], env);
           let changes = true;
           try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
@@ -974,13 +984,14 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
           } else {
             await runGit(dir, ['commit', '--allow-empty', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
           }
-          await runGit(dir, ['branch', '-M', branch], env);
           await runGit(dir, ['push', '-f', '-u', 'origin', branch], env);
         });
         const commit = await rev(dir, 'HEAD');
+        const afterFiles = await countFiles(dir);
+        console.log(`Push workspace: ${afterFiles} files after push for project ${project.id}`);
         await snapshotProject(updatedProject, dir, 'after-push');
         const persisted = await persistWorkingTree(updatedProject, dir);
-        updatedProject = { ...updatedProject, storagePath: persisted.storagePath, fileCount: await countFiles(dir), lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage: 'Push completed.', lastLocalChangeAt: nowIso() };
+        updatedProject = { ...updatedProject, storagePath: persisted.storagePath, fileCount: afterFiles, lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage: 'Push completed.', lastLocalChangeAt: nowIso() };
       });
       await dbUpsertProject(updatedProject);
       project.lastPushedAt = updatedProject.lastPushedAt;
