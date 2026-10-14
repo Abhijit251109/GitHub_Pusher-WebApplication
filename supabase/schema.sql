@@ -102,7 +102,7 @@ alter table public.snapshots enable row level security;
 
 -- Private object bucket for project archives and snapshots.
 insert into storage.buckets (id, name, public, file_size_limit)
-values ('gpp-private', 'gpp-private', false, 52428800)
+values ('gpp-private', 'gpp-private', false, 524288000)
 on conflict (id) do update set public = excluded.public, file_size_limit = excluded.file_size_limit;
 
 alter table storage.objects enable row level security;

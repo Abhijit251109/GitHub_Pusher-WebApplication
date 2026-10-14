@@ -275,7 +275,21 @@ async function dbListProjects(userId) {
   return (data || []).map(projectFromRow);
 }
 async function dbUpsertProject(project) {
-  await queryOne('projects', supabase.from('projects').upsert(projectToRow(project), { onConflict: 'id' }));
+  const row = projectToRow(project);
+  try {
+    await queryOne('projects', supabase.from('projects').upsert(row, { onConflict: 'id' }));
+  } catch (e) {
+    // If the database is missing the change tracking columns, drop them and retry
+    if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
+      const fallback = { ...row };
+      delete fallback.last_local_change_at;
+      delete fallback.last_github_change_at;
+      await queryOne('projects', supabase.from('projects').upsert(fallback, { onConflict: 'id' }));
+      console.warn('Database missing change tracking columns. Run supabase/schema.sql to add them.');
+    } else {
+      throw e;
+    }
+  }
   return project;
 }
 async function dbDeleteProject(projectId, userId) {
@@ -386,9 +400,16 @@ async function cleanupAuthRecords() {
 
 async function storageUpload(objectPath, data, contentType = 'application/octet-stream') {
   supabaseRequired();
-  if (Buffer.byteLength(data) > MAX_ARCHIVE_SIZE) throw new Error(`Stored archive exceeds the ${Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024)} MB free-tier archive limit.`);
+  const sizeMB = Math.round(Buffer.byteLength(data) / 1024 / 1024);
+  if (Buffer.byteLength(data) > MAX_ARCHIVE_SIZE) throw new Error(`Stored archive (${sizeMB} MB) exceeds the ${Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024)} MB limit.`);
   const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(objectPath, data, { contentType, upsert: true });
-  if (error) throw new Error(`Storage upload failed: ${error.message}`);
+  if (error) {
+    // Check if the error is due to the bucket file_size_limit
+    if (error.message && (error.message.includes('Size') || error.message.includes('limit') || error.message.includes('exceeds'))) {
+      throw new Error(`Upload (${sizeMB} MB) exceeds the storage bucket limit. Please run the updated supabase/schema.sql in your Supabase SQL Editor to increase the bucket limit.`);
+    }
+    throw new Error(`Storage upload failed: ${error.message}`);
+  }
 }
 async function storageDownload(objectPath) {
   supabaseRequired();
@@ -519,7 +540,7 @@ async function listSnapshots(projectId, userId) {
 }
 async function updateProject(projectId, userId, patch) {
   const current = await dbGetProject(projectId);
-  if (!current || current.userId !== String(userId)) throw new Error('Project not found.');
+  if (!current || String(current.userId) !== String(userId)) throw new Error('Project not found.');
   const updated = { ...current, ...patch, updatedAt: nowIso() };
   await dbUpsertProject(updated);
   return updated;
@@ -804,14 +825,15 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     const files = req.files || [];
     if (!files.length) throw new Error('Choose at least one file.');
     let total = 0;
+    let skipped = 0;
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-upload-'));
     for (const file of files) {
       total += Number(file.size || 0);
       if (total > MAX_TOTAL_UPLOAD) throw new Error(`Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`);
       const rel = safeRelative(file.originalname);
-      if (!rel) continue;
+      if (!rel) { skipped++; console.warn('Skipped file with invalid path:', file.originalname); continue; }
       const target = path.join(workspace, rel);
-      if (!target.startsWith(workspace + path.sep)) continue;
+      if (!target.startsWith(workspace + path.sep)) { skipped++; console.warn('Skipped file with unsafe path:', file.originalname); continue; }
       await fs.mkdir(path.dirname(target), { recursive: true });
       try {
         await fs.rename(file.path, target);
@@ -822,6 +844,7 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
         } else throw e;
       }
     }
+    if (skipped > 0) console.warn(`Upload skipped ${skipped} file(s) out of ${files.length} total.`);
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
     const name = normalizeName(req.body.projectName || first.split(/[\\/]/)[0]);
@@ -830,8 +853,14 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     broadcast(a.user.id, { type: 'projects-changed', projectId: id });
     res.json({ ...project, files: project.fileCount });
   } catch (e) {
-    console.error('Add project failed:', e.message, e.stack?.split('\n').slice(0, 3).join('\n'));
-    res.status(500).json({ error: e.message });
+    // If the database is missing the change tracking columns, give a clear message
+    if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
+      console.error('Add project failed: missing database columns. Run supabase/schema.sql to add them.');
+      res.status(500).json({ error: 'Database schema is outdated. Please contact the admin to run the updated supabase/schema.sql.' });
+    } else {
+      console.error('Add project failed:', e.message, e.stack?.split('\n').slice(0, 3).join('\n'));
+      res.status(500).json({ error: e.message });
+    }
   } finally {
     for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
     if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
@@ -921,13 +950,21 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
           const remoteBranch = repo.default_branch || branch;
           const remoteRef = await rev(dir, `origin/${remoteBranch}`);
           const head = await rev(dir, 'HEAD');
-          // If remote has history, pull it first to merge with local files
+          // If remote has history, merge it with local files to preserve both
           if (remoteRef && !head) {
             await runGit(dir, ['branch', '-M', branch], env);
-            await runGit(dir, ['pull', '-f', '--allow-unrelated-histories', 'origin', remoteBranch, '--no-edit'], env).catch(() => {
-              // If pull fails, reset to remote
-              return runGit(dir, ['reset', '--hard', 'origin/' + remoteBranch], env);
-            });
+            // Stage local files first so they're preserved during merge
+            await runGit(dir, ['add', '-A'], env);
+            await runGit(dir, ['commit', '-m', `Local files from ${APP_NAME} ${nowIso()}`], env).catch(() => {});
+            // Try to merge remote history with local files
+            try {
+              await runGit(dir, ['pull', '--allow-unrelated-histories', 'origin', remoteBranch, '--no-edit'], env);
+            } catch {
+              // If merge conflicts, keep local files and overwrite remote
+              await runGit(dir, ['checkout', '--ours', '--', '.'], env).catch(() => {});
+              await runGit(dir, ['add', '-A'], env);
+              await runGit(dir, ['commit', '-m', `Resolve merge: keep local files ${nowIso()}`], env).catch(() => {});
+            }
           }
           await runGit(dir, ['add', '-A'], env);
           let changes = true;
