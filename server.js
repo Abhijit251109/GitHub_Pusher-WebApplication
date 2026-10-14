@@ -821,6 +821,7 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     broadcast(a.user.id, { type: 'projects-changed', projectId: id });
     res.json({ ...project, files: project.fileCount });
   } catch (e) {
+    console.error('Add project failed:', e.message, e.stack?.split('\n').slice(0, 3).join('\n'));
     res.status(500).json({ error: e.message });
   } finally {
     for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});

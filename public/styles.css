@@ -899,7 +899,7 @@ label {
 
 .toast {
   position: fixed;
-  z-index: 10;
+  z-index: 9999;
   right: 22px;
   bottom: 22px;
   max-width: min(420px, calc(100vw - 32px));
