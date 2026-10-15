@@ -445,8 +445,8 @@ async function createArchive(sourceDir, destination, includeGit = true) {
       if (stat.isSymbolicLink() || stat.isSocket() || stat.isBlockDevice() || stat.isCharacterDevice() || stat.isFIFO()) {
         throw new Error('Project archives cannot contain symbolic links, device files, sockets, or FIFOs.');
       }
-      // Skip .git directory when not including git
-      if (!includeGit && entryPath && entryPath.startsWith('.git' + path.sep)) {
+      // Skip .git directory when not including git (tar always uses '/' separators)
+      if (!includeGit && entryPath && (entryPath === '.git' || entryPath.startsWith('.git/'))) {
         if (stat.isDirectory()) skippedDirs++;
         else skippedFiles++;
         return false;
@@ -498,8 +498,13 @@ async function withWorkspace(project, fn) {
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-project-'));
   try {
     if (project?.storagePath) {
-      const archive = await storageDownload(project.storagePath);
-      await extractArchive(archive, work);
+      try {
+        const archive = await storageDownload(project.storagePath);
+        await extractArchive(archive, work);
+      } catch (e) {
+        console.warn(`withWorkspace: could not restore archive for project ${project?.id}: ${e.message}`);
+        // Continue with empty workspace — git operations will still work
+      }
     }
     return await fn(work);
   } finally {
@@ -905,6 +910,8 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
         console.warn(`Add project: working tree persistence skipped for large project (${uploadedCount} files): ${e.message}`);
         syncMsg += ' (Cloud backup skipped: project too large.)';
         project.syncMessage = syncMsg;
+        // Clear storagePath so withWorkspace knows not to try downloading a non-existent archive
+        project.storagePath = null;
       }
       await dbUpsertProject(project);
     });
@@ -970,11 +977,18 @@ app.post('/api/github/fetch', ensureRequestProtection, async (req, res) => {
   try {
     const project = await dbGetProject(projectId);
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
-    if (!project.repoFullName || !project.branch) return res.status(400).json({ error: 'Project is not connected to a GitHub repository.' });
+    if (!project.repoFullName) return res.status(400).json({ error: 'Project is not connected to a GitHub repository. Push it first.' });
+    if (!project.branch) {
+      // Auto-set branch to main if missing
+      project.branch = 'main';
+    }
+    console.log(`Manual fetch requested for project ${project.id} (${project.repoFullName}, branch: ${project.branch})`);
     await syncProjectForUser(a.user, project);
     const updated = await dbGetProject(projectId);
+    console.log(`Fetch completed for project ${project.id}, sync state: ${updated?.syncState}, message: ${updated?.syncMessage}`);
     res.json({ ok: true, project: { ...updated, files: updated.fileCount } });
   } catch (e) {
+    console.error(`Fetch failed for project ${projectId}:`, e.message, e.stderr || '');
     const errorMsg = e.stderr || e.stdout || e.message || 'Fetch failed.';
     res.status(500).json({ error: errorMsg });
   }
@@ -1004,6 +1018,9 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
       await withWorkspace(project, async dir => {
         const beforeFiles = await countFiles(dir);
         console.log(`Push workspace: ${beforeFiles} files before git setup for project ${project.id}`);
+        if (beforeFiles === 0 && !project.storagePath) {
+          console.warn(`Push workspace is empty for project ${project.id}: no storage archive found. Pushing empty repo.`);
+        }
         await snapshotProject(updatedProject, dir, 'before-push').catch(e => console.warn(`Before-push snapshot skipped: ${e.message}`));
         await ensureGit(dir, repo.clone_url);
         await withGitAuth(token, async env => {
@@ -1047,7 +1064,9 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         console.log(`Push workspace: ${afterFiles} files after push for project ${project.id}`);
         // Post-push persistence: if storage upload fails (e.g., large project), still report push success
         let storagePath = project.storagePath;
-        let syncMessage = 'Push completed.';
+        let syncMessage = beforeFiles === 0
+          ? 'Push completed (warning: workspace was empty; files may not have been uploaded correctly).'
+          : 'Push completed.';
         try {
           await snapshotProject(updatedProject, dir, 'after-push');
         } catch (e) {
@@ -1088,7 +1107,47 @@ async function syncProjectForUser(user, project) {
         const before = await rev(dir, 'HEAD');
         await withGitAuth(token, env => runGit(dir, ['fetch', 'origin', project.branch], env));
         const remote = await rev(dir, `origin/${project.branch}`);
-        if (!remote || remote === before) return;
+        if (!remote) return;
+        // If no local HEAD (fresh workspace from storage restore), checkout remote branch directly
+        if (!before) {
+          if (dirty) {
+            // Local files exist but no commit yet: commit them first, then merge remote
+            await withGitAuth(token, async env => {
+              await runGit(dir, ['checkout', '-b', project.branch], env);
+              await runGit(dir, ['add', '-A'], env);
+              try { await runGit(dir, ['commit', '-m', `Initial commit ${nowIso()}`], env); } catch {}
+              try {
+                await runGit(dir, ['pull', '--allow-unrelated-histories', 'origin', project.branch, '--no-edit'], env);
+              } catch {
+                await runGit(dir, ['checkout', '--ours', '--', '.'], env).catch(() => {});
+                await runGit(dir, ['add', '-A'], env);
+                await runGit(dir, ['commit', '-m', `Resolve merge: keep local files ${nowIso()}`], env).catch(() => {});
+              }
+            });
+          } else {
+            // Clean workspace: just checkout the remote branch
+            await withGitAuth(token, async env => {
+              await runGit(dir, ['checkout', '-b', project.branch, 'origin/' + project.branch], env).catch(() => {
+                return runGit(dir, ['reset', '--hard', 'origin/' + project.branch], env);
+              });
+            });
+          }
+          const after = await rev(dir, 'HEAD');
+          const fileCount = await countFiles(dir);
+          let storagePath = project.storagePath;
+          let syncMessage = 'Remote changes pulled automatically.';
+          try {
+            const persisted = await persistWorkingTree(project, dir);
+            storagePath = persisted.storagePath;
+          } catch (e) {
+            console.warn(`Sync: working tree persistence skipped for large project (${fileCount} files): ${e.message}`);
+            syncMessage += ' (Cloud backup skipped: project too large.)';
+          }
+          await updateProject(project.id, user.id, { storagePath, fileCount, syncState: 'synced', syncMessage, lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
+          broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
+          return;
+        }
+        if (remote === before) return;
         if (dirty) {
           await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: 'Remote changes detected but local edits were left untouched.', lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
           broadcast(user.id, { type: 'sync-conflict', projectId: project.id });
@@ -1112,6 +1171,7 @@ async function syncProjectForUser(user, project) {
         await updateProject(project.id, user.id, { storagePath, fileCount, syncState: 'synced', syncMessage, lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
         broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
       } catch (e) {
+        console.error(`Sync failed for project ${project.id}:`, e.message, e.stderr || '');
         await updateProject(project.id, user.id, { syncState: 'error', syncMessage: e.stderr || e.message, lastCheckedAt: nowIso() }).catch(() => {});
         broadcast(user.id, { type: 'sync-error', projectId: project.id });
       }
@@ -1126,11 +1186,26 @@ async function syncAll() {
     const users = await dbListUsers();
     for (const user of users) {
       if (!user.githubTokenEnc) continue;
-      const projects = await dbListProjects(user.id);
-      for (const project of projects) if (project.repoFullName) await syncProjectForUser(user, project);
+      try {
+        const projects = await dbListProjects(user.id);
+        for (const project of projects) {
+          if (project.repoFullName) {
+            try {
+              await syncProjectForUser(user, project);
+            } catch (e) {
+              console.error(`Auto-sync failed for project ${project.id}:`, e.message);
+            }
+          }
+        }
+      } catch (e) {
+        console.error(`Auto-sync failed for user ${user.id}:`, e.message);
+      }
     }
-  } catch {}
-  finally { syncRunning = false; }
+  } catch (e) {
+    console.error('Auto-sync cycle failed:', e.message);
+  } finally {
+    syncRunning = false;
+  }
 }
 
 app.get('/api/health', async (_req, res) => {
