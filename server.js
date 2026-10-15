@@ -429,7 +429,6 @@ async function storageRemove(paths) {
 // Patterns to skip when creating archives (large generated files that bloat storage)
 // Used in createArchive (full paths) and countFiles (directory names only)
 const ARCHIVE_SKIP_NAMES = new Set(['node_modules', '.venv', '__pycache__', '.gradle', '.m2', 'target', 'build', 'dist', '.next', '.cache']);
-const ARCHIVE_SKIP_PATTERNS = /^(node_modules|\.venv|__pycache__|\.gradle|\.m2|target|build[/\\]|dist[/\\]|\.next[/\\]|\.cache[/\\])/;
 async function createArchive(sourceDir, destination, includeGit = true) {
   // Use '.' as the entry so tar walks the tree — skip patterns are handled in the filter
   const entries = ['.'];
@@ -445,14 +444,18 @@ async function createArchive(sourceDir, destination, includeGit = true) {
       if (stat.isSymbolicLink() || stat.isSocket() || stat.isBlockDevice() || stat.isCharacterDevice() || stat.isFIFO()) {
         throw new Error('Project archives cannot contain symbolic links, device files, sockets, or FIFOs.');
       }
-      // Skip .git directory when not including git (tar always uses '/' separators)
-      if (!includeGit && entryPath && (entryPath === '.git' || entryPath.startsWith('.git/'))) {
+      // Normalize entry path: tar with entries=['.'] produces paths like './.git' or './node_modules/file.js'
+      // Strip the leading './' so we can match against directory names directly
+      const normalized = entryPath && entryPath.startsWith('./') ? entryPath.slice(2) : (entryPath || '');
+      // Skip .git directory when not including git
+      if (!includeGit && (normalized === '.git' || normalized.startsWith('.git/'))) {
         if (stat.isDirectory()) skippedDirs++;
         else skippedFiles++;
         return false;
       }
-      // Skip large generated directories
-      if (entryPath && ARCHIVE_SKIP_PATTERNS.test(entryPath)) {
+      // Skip large generated directories by checking the first path component
+      const firstComponent = normalized.split('/')[0];
+      if (firstComponent && ARCHIVE_SKIP_NAMES.has(firstComponent)) {
         if (stat.isDirectory()) skippedDirs++;
         else skippedFiles++;
         return false;
@@ -501,6 +504,8 @@ async function withWorkspace(project, fn) {
       try {
         const archive = await storageDownload(project.storagePath);
         await extractArchive(archive, work);
+        const restored = await countFiles(work);
+        console.log(`withWorkspace: restored ${restored} files from archive for project ${project?.id}`);
       } catch (e) {
         console.warn(`withWorkspace: could not restore archive for project ${project?.id}: ${e.message}`);
         // Continue with empty workspace — git operations will still work
@@ -515,11 +520,14 @@ async function persistWorkingTree(project, work) {
   const archive = path.join(os.tmpdir(), `gpp-working-${crypto.randomUUID()}.tgz`);
   try {
     // Exclude .git from the archive — it will be recreated by ensureGit on next workspace load
-    await createArchive(work, archive, false);
+    const archiveSize = await createArchive(work, archive, false);
+    const fileCount = await countFiles(work);
+    console.log(`persistWorkingTree: archiving ${fileCount} files (${Math.round(archiveSize / 1024)} KB) for project ${project.id}`);
     const buf = await fs.readFile(archive);
     const objectPath = project.storagePath || `projects/${project.userId}/${project.id}/working.tgz`;
     await storageUpload(objectPath, buf, 'application/gzip');
     const stat = await fs.stat(archive);
+    console.log(`persistWorkingTree: uploaded archive for project ${project.id} to ${objectPath} (${Math.round(stat.size / 1024)} KB)`);
     return { storagePath: objectPath, archiveBytes: stat.size };
   } finally {
     await fs.rm(archive, { force: true }).catch(() => {});
@@ -1017,9 +1025,13 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
       let updatedProject = { ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch };
       await withWorkspace(project, async dir => {
         const beforeFiles = await countFiles(dir);
-        console.log(`Push workspace: ${beforeFiles} files before git setup for project ${project.id}`);
-        if (beforeFiles === 0 && !project.storagePath) {
-          console.warn(`Push workspace is empty for project ${project.id}: no storage archive found. Pushing empty repo.`);
+        console.log(`Push workspace: ${beforeFiles} files before git setup for project ${project.id} (storagePath: ${project.storagePath || 'none'})`);
+        if (beforeFiles === 0) {
+          if (project.storagePath) {
+            console.warn(`Push workspace is empty for project ${project.id}: archive existed at ${project.storagePath} but extracted 0 files. Pushing empty repo.`);
+          } else {
+            console.warn(`Push workspace is empty for project ${project.id}: no storage archive found. Pushing empty repo.`);
+          }
         }
         await snapshotProject(updatedProject, dir, 'before-push').catch(e => console.warn(`Before-push snapshot skipped: ${e.message}`));
         await ensureGit(dir, repo.clone_url);
@@ -1065,7 +1077,7 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         // Post-push persistence: if storage upload fails (e.g., large project), still report push success
         let storagePath = project.storagePath;
         let syncMessage = beforeFiles === 0
-          ? 'Push completed (warning: workspace was empty; files may not have been uploaded correctly).'
+          ? `Push completed (warning: workspace was empty with 0 files; expected ${project.fileCount || 'unknown'} files. Files may not have been uploaded correctly.)`
           : 'Push completed.';
         try {
           await snapshotProject(updatedProject, dir, 'after-push');
