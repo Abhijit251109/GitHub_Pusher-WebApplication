@@ -6,13 +6,28 @@
 <meta name="theme-color" content="#111827">
 <meta name="referrer" content="no-referrer">
 <meta name="description" content="Sign in to GitHub Project Pusher with your GitHub account.">
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self' https://*.onrender.com https://*.github.io http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.onrender.com https://*.github.io http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
 <link rel="icon" href="icons/icon.svg">
 <link rel="stylesheet" href="login.css">
+<script src="theme.js"></script>
 <title>GitHub Project Pusher — Sign In</title>
 </head>
 <body>
+  <div class="theme-toggle">
+    <label class="theme-control">
+      <span class="sr-only">Color theme</span>
+      <select data-theme-select aria-label="Color theme">
+        <option value="system">System</option>
+        <option value="light">Light</option>
+        <option value="dark">Dark</option>
+      </select>
+    </label>
+  </div>
 <main>
+  <div class="orb" aria-hidden="true">⌁</div>
   <h1>GitHub Project Pusher</h1>
   <p id="status" class="muted">Your projects, always with you. Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p>
   <div id="setup" class="hidden">
