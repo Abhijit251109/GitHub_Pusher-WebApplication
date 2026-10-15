@@ -25,15 +25,15 @@ services:
       - key: SESSION_TTL_DAYS
         value: "7"
       - key: MAX_TOTAL_UPLOAD_MB
-        value: "40"
+        value: "200"
       - key: MAX_ARCHIVE_MB
-        value: "45"
+        value: "200"
       - key: MAX_EXTRACTED_MB
-        value: "150"
+        value: "500"
       - key: MAX_ARCHIVE_ENTRIES
-        value: "10000"
+        value: "50000"
       - key: MAX_DECOMPRESSION_RATIO
-        value: "20"
+        value: "200"
       - key: MAX_SNAPSHOTS_PER_PROJECT
         value: "10"
       - key: APP_NAME

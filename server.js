@@ -95,7 +95,14 @@ app.use(helmet({
       scriptSrc: ["'self'"],
       styleSrc: ["'self'"],
       imgSrc: ["'self'", 'data:'],
-      connectSrc: ["'self'", ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : [])],
+      connectSrc: [
+        "'self'",
+        ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : []),
+        // Allow GitHub Pages origins in production
+        ...(isProd ? ['https://*.github.io'] : []),
+        // Allow local development origins
+        ...(!isProd ? ['http://localhost:*', 'http://127.0.0.1:*'] : [])
+      ],
       fontSrc: ["'self'"],
       objectSrc: ["'none'"],
       baseUri: ["'self'"],
@@ -166,6 +173,14 @@ function allowedOrigin(origin) {
     const normalized = new URL(origin).origin;
     if (FRONTEND_ORIGIN && normalized === FRONTEND_ORIGIN) return true;
     if (process.env.PUBLIC_BASE_URL && normalized === new URL(process.env.PUBLIC_BASE_URL).origin) return true;
+    // Allow GitHub Pages origins in production when FRONTEND_URL is not explicitly set
+    if (isProd && normalized.endsWith('.github.io')) return true;
+    // In development, allow localhost origins
+    if (!isProd) {
+      const localhostPorts = ['3000', '5173', '5174', '8080', '4173'];
+      if (normalized.startsWith('http://localhost:') && localhostPorts.includes(new URL(normalized).port)) return true;
+      if (normalized === 'http://localhost' || normalized === 'http://127.0.0.1:4173') return true;
+    }
   } catch {}
   return false;
 }
