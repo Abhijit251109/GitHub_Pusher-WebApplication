@@ -1,0 +1,429 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GitHub Project Pusher – Developer Guide</title>
+<style>
+:root{color-scheme:dark;--bg:#0b1020;--glow:#1a1640;--panel:#141c30;--raised:#19243b;--field:#0e1628;--text:#eef2ff;--muted:#9aa8c0;--line:#2b3955;--accent:#a78bfa;--accent2:#8b5cf6;--soft:rgba(139,92,246,.16);--ok:#34d399;--bad:#fb7185;--warn:#fbbf24;--info:#60a5fa}
+*,*::before,*::after{box-sizing:border-box}
+:where(.grid>*,.flex>*){min-width:0}
+:where(p,li,td,th,h1,h2,h3,code,.chip){overflow-wrap:anywhere}
+html{scroll-behavior:smooth}
+body{margin:0;font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif;color:var(--text);background:radial-gradient(ellipse at 10% 0,var(--glow),transparent 36rem),var(--bg);background-attachment:fixed}
+a{color:var(--accent)}
+code{font:12.5px ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--field);border:1px solid var(--line);padding:1px 6px;border-radius:6px;color:#c9d6ff}
+header.top{padding:48px 24px 28px;max-width:1180px;margin:auto}
+.eyebrow{color:var(--accent);font-size:12px;letter-spacing:.14em;text-transform:uppercase;font-weight:700}
+h1{font-size:clamp(28px,5vw,44px);line-height:1.1;margin:8px 0 12px}
+h2{font-size:24px;margin:0 0 6px}
+h3{font-size:16px;margin:0 0 6px}
+.lead{color:var(--muted);max-width:760px;font-size:17px}
+nav.tabs{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav.tabs div{max-width:1180px;margin:auto;padding:10px 24px;display:flex;gap:6px;overflow-x:auto}
+nav.tabs a{white-space:nowrap;text-decoration:none;color:var(--muted);padding:6px 12px;border-radius:999px;font-size:13px;font-weight:600;border:1px solid transparent}
+nav.tabs a:hover{color:var(--text);border-color:var(--line);background:var(--soft)}
+main{max-width:1180px;margin:auto;padding:12px 24px 80px}
+section{padding-top:44px}
+.sub{color:var(--muted);margin:0 0 18px}
+.grid{display:grid;gap:14px}
+.g2{grid-template-columns:repeat(auto-fit,minmax(min(100%,340px),1fr))}
+.g3{grid-template-columns:repeat(auto-fit,minmax(min(100%,250px),1fr))}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:18px;box-shadow:0 18px 50px rgba(0,0,0,.25)}
+.card p{margin:4px 0;color:var(--muted);font-size:14px}
+.card ul{margin:6px 0 0;padding-left:18px;color:var(--muted);font-size:14px}
+.chip{display:inline-block;font-size:11px;font-weight:700;padding:2px 9px;border-radius:999px;border:1px solid var(--line);margin-right:4px;background:var(--field)}
+.c-ok{color:var(--ok);border-color:rgba(52,211,153,.4)}.c-bad{color:var(--bad);border-color:rgba(251,113,133,.4)}.c-warn{color:var(--warn);border-color:rgba(251,191,36,.4)}.c-info{color:var(--info);border-color:rgba(96,165,250,.4)}.c-acc{color:var(--accent);border-color:rgba(167,139,250,.5)}
+.diagram{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:16px;overflow-x:auto;margin:12px 0}
+.mermaid{text-align:center}
+.tw{overflow-x:auto;border:1px solid var(--line);border-radius:14px;background:var(--panel)}
+table{border-collapse:collapse;width:100%;font-size:13.5px}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+th{background:var(--raised);color:var(--muted);font-size:11.5px;letter-spacing:.08em;text-transform:uppercase}
+tr:last-child td{border-bottom:0}
+.callout{border:1px solid var(--line);border-left:4px solid var(--warn);background:var(--panel);border-radius:12px;padding:12px 16px;margin:10px 0}
+.callout.bad{border-left-color:var(--bad)}.callout.ok{border-left-color:var(--ok)}.callout.info{border-left-color:var(--info)}
+.callout b{display:block;margin-bottom:2px}
+.callout p{margin:2px 0;color:var(--muted);font-size:14px}
+.tree{font:12.5px/1.7 ui-monospace,Menlo,monospace;background:var(--field);border:1px solid var(--line);border-radius:14px;padding:14px 18px;overflow-x:auto;white-space:pre;color:#c9d6ff}
+.tree i{color:var(--muted);font-style:normal}
+.stat{display:flex;gap:12px;flex-wrap:wrap;margin-top:18px}
+.stat div{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 16px}
+.stat b{display:block;font-size:22px;color:var(--accent)}.stat span{font-size:12px;color:var(--muted)}
+.step{display:flex;gap:12px;align-items:flex-start;padding:8px 0}
+.step .n{flex:none;width:26px;height:26px;border-radius:50%;background:var(--soft);color:var(--accent);display:grid;place-items:center;font-weight:700;font-size:13px;border:1px solid rgba(167,139,250,.4)}
+.step p{margin:0;color:var(--muted)}
+.step p b{color:var(--text)}
+</style>
+</head>
+<body>
+<header class="top">
+  <div class="eyebrow">Developer guide · v3.0.0</div>
+  <h1>GitHub Project Pusher</h1>
+  <p class="lead">A personal cloud "project library": upload a folder, keep it durably in Supabase, push it to a GitHub repo, and auto-pull remote changes every 30s. Everything you should know before adding or fixing a feature.</p>
+  <div class="stat">
+    <div><b>1</b><span>Express server (server.js, 1278 lines)</span></div>
+    <div><b>7</b><span>Supabase tables + 1 private bucket</span></div>
+    <div><b>19</b><span>HTTP routes</span></div>
+    <div><b>4</b><span>Clients: Web/PWA, Electron, Android, GH Pages</span></div>
+    <div><b>0</b><span>Automated tests (syntax check only)</span></div>
+  </div>
+</header>
+
+<div style="max-width:1180px;margin:0 auto 18px;padding:0 24px"><div class="callout ok" style="margin:0"><b>Review decisions captured (nothing in server.js has been changed yet)</b><p>① Sync interval → 60–120s (env only) · ② Include <code>.git</code> in the working archive (needs the dist/build fix, see Gotchas 1–2) · ③ Decide: warning state vs loud failure for backup steps · ④ Decide: keep <code>dist/ build/</code> skipped or store them.</p></div></div>
+<nav class="tabs"><div>
+  <a href="#features">Features</a><a href="#arch">Architecture</a><a href="#auth">Auth flow</a><a href="#push">Push flow</a><a href="#sync">Sync flow</a><a href="#data">Data model</a><a href="#api">API</a><a href="#frontend">Frontend</a><a href="#files">File map</a><a href="#gotchas">Gotchas</a><a href="#recipes">Change recipes</a><a href="#run">Run &amp; deploy</a>
+</div></nav>
+
+<main>
+
+<section id="features">
+  <h2>What the product does</h2>
+  <p class="sub">Seven user-facing features. Each maps to code you will touch.</p>
+  <div class="grid g3">
+    <div class="card"><span class="chip c-acc">Auth</span><h3>GitHub sign-in</h3><p>OAuth with PKCE + state + browser-binding cookie. Optional allow-list of GitHub user IDs. Tokens stored AES-256-GCM encrypted.</p><p><code>/api/auth/*</code> · <code>login.js</code></p></div>
+    <div class="card"><span class="chip c-acc">Library</span><h3>Add / remove projects</h3><p>Upload a folder or files (multipart). Server rebuilds the tree, tars it, stores it in Supabase Storage. Delete wipes archive + snapshots, never the GitHub repo.</p><p><code>POST/DELETE /api/projects</code></p></div>
+    <div class="card"><span class="chip c-acc">Push</span><h3>Push to GitHub</h3><p>Pick an existing repo or create one (private/public), choose branch. Server merges remote first (local wins), commits, then <b>force-pushes</b>.</p><p><code>POST /api/github/push</code></p></div>
+    <div class="card"><span class="chip c-acc">Sync</span><h3>Auto-pull + manual fetch</h3><p>Background worker every <code>SYNC_INTERVAL_MS</code> checks every connected project. Fast-forwards if clean, flags <i>conflict</i> if local edits exist.</p><p><code>syncProjectForUser()</code></p></div>
+    <div class="card"><span class="chip c-acc">Safety</span><h3>Snapshots</h3><p>Before/after every push and pull, de-duplicated by SHA-256, capped at 10 per project. Listed in the UI (read-only: no restore endpoint yet).</p><p><code>snapshotProject()</code></p></div>
+    <div class="card"><span class="chip c-acc">Live</span><h3>Realtime status (SSE)</h3><p>One-time ticket → EventSource. Events: <code>projects-changed</code>, <code>project-updated</code>, <code>sync-conflict</code>, <code>sync-error</code>.</p><p><code>/api/events</code></p></div>
+    <div class="card"><span class="chip c-acc">Distribution</span><h3>Downloads + PWA + native</h3><p>Drop installers into <code>application/&lt;platform&gt;/</code> and they auto-list. Installable PWA, Electron desktop, Capacitor Android. Dark/light/system theme.</p><p><code>/api/applications</code></p></div>
+  </div>
+</section>
+
+<section id="arch">
+  <h2>Architecture</h2>
+  <p class="sub">A static frontend plus one stateless-ish Node process. All durable state lives in Supabase; the Render disk is disposable.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart LR
+  subgraph Clients
+    W["Web / PWA&lt;br/&gt;public/*"]
+    P["GitHub Pages&lt;br/&gt;static copy of public/"]
+    E["Electron&lt;br/&gt;loads hosted URL"]
+    A["Android (Capacitor)&lt;br/&gt;loads hosted URL"]
+  end
+  subgraph Backend["Render: server.js (Express 5)"]
+    MW["CORS → Helmet CSP → JSON/urlencoded → static"]
+    AUTH["Auth: OAuth/PKCE, sessions"]
+    PROJ["Projects API + multer upload"]
+    GH["Push / Fetch + git runner"]
+    SYNC["syncAll() timer"]
+    SSE["SSE hub (in-memory Map)"]
+    LOCK["projectLocks (in-memory)"]
+  end
+  subgraph Supabase
+    PG[("Postgres&lt;br/&gt;users, sessions, projects,&lt;br/&gt;snapshots, oauth_attempts,&lt;br/&gt;login_codes, sse_tickets")]
+    ST[("Storage bucket gpp-private&lt;br/&gt;working.tgz + snapshots")]
+  end
+  GHA["GitHub API + git remote"]
+  W --> MW
+  P -- "Bearer token, CORS" --> MW
+  E --> MW
+  A --> MW
+  MW --> AUTH & PROJ & GH & SSE
+  GH --> LOCK
+  SYNC --> LOCK
+  AUTH --> PG
+  PROJ --> PG
+  PROJ --> ST
+  GH --> ST
+  GH --> PG
+  SYNC --> PG
+  GH <--> GHA
+  SYNC <--> GHA
+  AUTH <--> GHA
+  GH -. broadcast .-> SSE
+  SYNC -. broadcast .-> SSE
+  SSE -. events .-> W
+  </pre></div>
+  <div class="grid g2">
+    <div class="callout info"><b>Durability model</b><p>Every git operation runs in a throwaway temp dir (<code>withWorkspace</code>): download <code>working.tgz</code> → extract → run git → re-archive → delete temp dir. A restart loses nothing.</p></div>
+    <div class="callout"><b>Single-instance assumption</b><p><code>projectLocks</code>, SSE <code>clients</code> and <code>syncRunning</code> are in-process memory. Run two server instances and locks stop working and SSE events miss users.</p></div>
+  </div>
+</section>
+
+<section id="auth">
+  <h2>Authentication &amp; sessions</h2>
+  <p class="sub">Two paths: same-origin cookie, or cross-origin (Pages / native) via one-time code → Bearer token.</p>
+  <div class="diagram"><pre class="mermaid">
+sequenceDiagram
+  autonumber
+  participant B as Browser / App
+  participant S as server.js
+  participant DB as Supabase PG
+  participant G as GitHub
+  B->>S: GET /api/auth/login?return_to=… (or client=android|desktop&amp;mobile_nonce)
+  S->>DB: insert oauth_attempts(state_hash, verifier, return_to, cookie_hash)
+  S-->>B: Set-Cookie gpp_oauth_pre + 302 to GitHub (PKCE S256)
+  B->>G: authorize
+  G-->>B: 302 /auth/github/callback?code&amp;state
+  B->>S: callback (+ gpp_oauth_pre cookie)
+  S->>DB: consume oauth_attempt (delete, check expiry + cookie binding)
+  S->>G: POST access_token (code + verifier)
+  S->>G: GET /user
+  S->>DB: upsert users (tokens AES-GCM encrypted)
+  alt return_to present (Pages / native)
+    S->>DB: insert login_codes (2 min TTL)
+    S-->>B: 302 return_to?code=…
+    B->>S: POST /api/auth/exchange {code}
+    S->>DB: consume code, insert session (hash only)
+    S-->>B: {token}  → sessionStorage gpp_access_token
+  else same origin
+    S->>DB: insert session
+    S-->>B: Set-Cookie gpp_session + 302 /
+  end
+  </pre></div>
+  <div class="grid g3">
+    <div class="card"><h3>Sessions</h3><p>Random 32-byte token; DB stores only <code>HMAC-SHA256(SESSION_SECRET)</code>. TTL <code>SESSION_TTL_DAYS</code> (7). Bearer header wins over cookie.</p></div>
+    <div class="card"><h3>GitHub token</h3><p>Encrypted with <code>TOKEN_ENCRYPTION_KEY</code>. <code>userToken()</code> auto-refreshes within 60s of expiry (needs <code>offline_access</code>).</p></div>
+    <div class="card"><h3>CSRF-ish guard</h3><p><code>ensureRequestProtection</code> on all mutating routes: Bearer requests pass; otherwise Origin must be allow-listed.</p></div>
+  </div>
+  <h3 style="margin-top:22px">Why PKCE + state + browser-binding cookie? <span class="chip c-info">explainer</span></h3>
+  <p class="sub">Three small secrets, each stopping a different attack on the OAuth redirect. The server generates all three in <code>/api/auth/login</code> and checks them in <code>consumeOAuthAttempt()</code>.</p>
+  <div class="grid g3">
+    <div class="card"><span class="chip c-acc">state</span><h3>Stops forged callbacks (CSRF)</h3><p>A random value sent to GitHub and echoed back on the callback. The server only accepts a callback whose <code>state</code> it issued, once, within 10 minutes.</p><p><b>Attack stopped:</b> an attacker tricks you into hitting <code>/callback?code=THEIR_CODE</code>, logging you into their GitHub account.</p></div>
+    <div class="card"><span class="chip c-acc">PKCE</span><h3>Stops stolen auth codes</h3><p>Server makes a secret <code>code_verifier</code>, sends only its SHA-256 hash (<code>code_challenge</code>) to GitHub, and reveals the verifier when swapping the code for a token.</p><p><b>Attack stopped:</b> someone who intercepts the <code>?code=</code> in the redirect (e.g. a custom-URI handler on Android/desktop) cannot redeem it without the verifier.</p></div>
+    <div class="card"><span class="chip c-acc">binding cookie</span><h3>Stops cross-browser replay</h3><p>An HttpOnly cookie <code>gpp_oauth_pre</code> is set in the browser that started login; only its hash is stored with the attempt. The callback must arrive with the same cookie.</p><p><b>Attack stopped:</b> a valid <code>state</code> URL being completed in a different browser than the one that began the login. Native apps skip this (they return via the app URI) and rely on state + PKCE + a nonce.</p></div>
+  </div>
+  <div class="callout info"><b>Plain-language version</b><p><i>state</i> = "this reply belongs to a request I made." <i>PKCE</i> = "whoever redeems the code must be the one who asked for it." <i>cookie</i> = "and from the same browser." You don't need to touch these unless you change the login routes.</p></div>
+</section>
+
+<section id="push">
+  <h2>Push flow <span class="chip c-bad">highest-risk code</span></h2>
+  <p class="sub"><code>POST /api/github/push</code> (server.js:1020). Runs under the per-project lock, 10-minute timeout.</p>
+  <div class="diagram"><pre class="mermaid">
+flowchart TD
+  A["Auth + load project, check ownership"] --> B["userToken() – decrypt / refresh"]
+  B --> C{"repoId given?"}
+  C -- yes --> D["GET /repositories/:id"]
+  C -- no --> E["GET repo by name → else POST /user/repos create"]
+  D & E --> F["withWorkspace: download + extract working.tgz"]
+  F --> G["snapshot 'before-push' (non-fatal)"]
+  G --> H["ensureGit: sanitize .git, set remote origin"]
+  H --> I["git fetch origin"]
+  I --> J{"origin/branch exists?"}
+  J -- no --> N
+  J -- yes --> K{"local HEAD exists?"}
+  K -- no --> L["checkout -b branch origin/branch&lt;br/&gt;(fallback reset --hard)"]
+  K -- yes --> M["git pull --allow-unrelated-histories"]
+  M -- conflict --> M2["checkout --ours · add -A · commit"]
+  L & M & M2 --> N["git add -A"]
+  N --> O{"staged changes?"}
+  O -- yes --> P["commit 'Sync from APP_NAME ts'"]
+  O -- no --> P2["commit --allow-empty"]
+  P & P2 --> Q["git push -f -u origin branch"]
+  Q --> R["snapshot 'after-push' (non-fatal)"]
+  R --> S["persistWorkingTree → Storage (non-fatal)"]
+  S --> T["upsert project: synced, lastPushedCommit, fileCount"]
+  T --> U["broadcast project-updated"]
+  </pre></div>
+  <div class="callout bad"><b>Force push</b><p>Final step is <code>push -f</code>. The merge-first logic is the only protection against overwriting remote work, and on conflict it silently keeps local files (<code>--ours</code>).</p></div>
+  <div class="callout"><b>Why snapshot / persistence failures don't fail the request</b><p>By the time they run, <code>git push</code> has <b>already succeeded on GitHub</b>. Throwing would mark the project <code>error</code> and show "Push failed" for a push that actually landed, and the next retry would re-push. These later steps are only backups (snapshot, Storage copy), so the code appends a note to <code>syncMessage</code> instead. On any thrown error earlier in the flow, <code>syncState</code> becomes <code>error</code>.</p><p><b>The weakness:</b> the note is only a text suffix, easy to miss in the UI, and a missed Storage upload means the next run restores a stale archive. Better options: (a) keep success but add a <code>syncState='warning'</code> with a visible badge, or (b) fail loudly only when the Storage upload fails. Say which you prefer.</p></div>
+</section>
+
+<section id="sync">
+  <h2>Sync worker &amp; fetch</h2>
+  <p class="sub"><code>syncAll()</code> every <code>SYNC_INTERVAL_MS</code> (30s) loops <b>every user → every project with a repo</b>. Manual "Fetch Changes" calls the same <code>syncProjectForUser()</code>.</p>
+  <div class="callout ok"><b>Decision: slow the loop to 60–120s</b><p>No code change needed. <code>SYNC_INTERVAL_MS</code> is already read from env (server.js:39). Set it to <code>60000</code> or <code>120000</code> in <code>.env</code> and in <code>render.yaml</code> (currently <code>"30000"</code>), and update the example in <code>.env.example</code>. Halving the rate halves the archive downloads. The manual "Fetch Changes" button still gives an instant sync.</p></div>
+  <div class="diagram"><pre class="mermaid">
+stateDiagram-v2
+  [*] --> local: upload
+  local --> synced: push OK
+  synced --> synced: remote == local (no-op)
+  synced --> synced: remote ahead & workspace clean → ff-only pull
+  synced --> conflict: remote ahead & dirty working tree
+  conflict --> synced: next push (merge, local wins)
+  local --> error: push fails
+  synced --> error: git/storage error
+  error --> synced: next successful push or sync
+  </pre></div>
+  <div class="grid g2">
+    <div class="card"><h3>Cost per tick</h3><p>Each project = full archive download from Storage + extract + <code>git fetch</code>, even when nothing changed. Scales linearly with users × projects.</p></div>
+    <div class="card"><h3>"Dirty" definition</h3><p><code>git status --porcelain</code> on the restored tree. Because <code>.git</code> is not archived (see Gotchas), a restored workspace usually has no HEAD, which triggers the "first checkout" branch instead.</p></div>
+  </div>
+</section>
+
+<section id="data">
+  <h2>Data model</h2>
+  <p class="sub">Defined in <code>supabase/schema.sql</code> (idempotent; re-run after changes). RLS is on, and the backend uses the service-role key to bypass it.</p>
+  <div class="diagram"><pre class="mermaid">
+erDiagram
+  users ||--o{ sessions : has
+  users ||--o{ login_codes : has
+  users ||--o{ sse_tickets : has
+  users ||--o{ projects : owns
+  projects ||--o{ snapshots : has
+  users { text id PK "GitHub numeric id"
+          text login
+          text github_token_enc
+          text github_refresh_token_enc
+          timestamptz github_expires_at }
+  sessions { text id PK "HMAC of token"
+             text user_id FK "null = anonymous"
+             timestamptz expires_at }
+  oauth_attempts { text state_hash PK
+                   text code_verifier
+                   text return_to
+                   text client_cookie_hash }
+  login_codes { text code_hash PK
+                text user_id FK }
+  sse_tickets { text ticket_hash PK
+                text user_id FK }
+  projects { uuid id PK
+             text user_id FK
+             text name
+             text sync_state "local|synced|conflict|error"
+             text repo_full_name
+             text remote_url
+             text branch
+             text last_pushed_commit
+             int file_count
+             text storage_path
+             timestamptz last_local_change_at
+             timestamptz last_github_change_at }
+  snapshots { uuid id PK
+              uuid project_id FK
+              text label "before-push, after-pull…"
+              text storage_path
+              text content_hash }
+  </pre></div>
+  <div class="grid g2">
+    <div class="card"><h3>Storage layout (bucket <code>gpp-private</code>)</h3>
+      <ul><li><code>projects/&lt;userId&gt;/&lt;projectId&gt;/working.tgz</code></li><li><code>snapshots/&lt;userId&gt;/&lt;projectId&gt;/&lt;ISO-stamp&gt;-&lt;label&gt;.tgz</code></li></ul></div>
+    <div class="card"><h3>Row mapping</h3><p>DB is snake_case, app is camelCase. Add a column in <b>three</b> places: <code>schema.sql</code>, <code>projectFromRow</code>, <code>projectToRow</code>.</p></div>
+  </div>
+</section>
+
+<section id="api">
+  <h2>API reference</h2>
+  <p class="sub">All in <code>server.js</code>. "Guard" = <code>ensureRequestProtection</code>.</p>
+  <div class="tw"><table>
+    <tr><th>Method · Path</th><th>Auth</th><th>What it does</th><th>Line</th></tr>
+    <tr><td><code>GET /api/health</code></td><td>none</td><td>Persistence + datastore check; Render health probe</td><td>1245</td></tr>
+    <tr><td><code>GET /api/auth/me</code></td><td>optional</td><td>Returns <code>{authenticated,user}</code></td><td>740</td></tr>
+    <tr><td><code>GET /api/auth/login</code></td><td>none</td><td>Start OAuth (web / android / desktop)</td><td>748</td></tr>
+    <tr><td><code>GET /auth/github/callback</code></td><td>cookie binding</td><td>Finish OAuth, create session or login code</td><td>786</td></tr>
+    <tr><td><code>POST /api/auth/exchange</code></td><td>Guard</td><td>One-time code → Bearer token</td><td>826</td></tr>
+    <tr><td><code>POST /api/auth/logout</code></td><td>Guard</td><td>Delete session, clear cookie</td><td>837</td></tr>
+    <tr><td><code>GET /api/applications</code>, <code>…/download/:platform/:name</code></td><td>none</td><td>List/download native builds (extension allow-list per platform)</td><td>847</td></tr>
+    <tr><td><code>GET /api/events/ticket</code> → <code>GET /api/events?ticket=</code></td><td>session</td><td>SSE stream (25s heartbeat)</td><td>855</td></tr>
+    <tr><td><code>GET /api/projects</code></td><td>session</td><td>List user's projects</td><td>877</td></tr>
+    <tr><td><code>POST /api/projects</code></td><td>Guard + session</td><td>Multipart upload (field <code>files</code>, <code>projectName</code>)</td><td>884</td></tr>
+    <tr><td><code>DELETE /api/projects/:id</code></td><td>Guard + session</td><td>Remove archive, snapshots, row</td><td>962</td></tr>
+    <tr><td><code>GET /api/projects/:id/history</code></td><td>session</td><td>List snapshots</td><td>978</td></tr>
+    <tr><td><code>GET /api/github/repos</code></td><td>session</td><td>Up to 1000 repos (10 pages × 100)</td><td>987</td></tr>
+    <tr><td><code>POST /api/github/fetch</code></td><td>Guard + session</td><td>Manual sync of one project</td><td>1000</td></tr>
+    <tr><td><code>POST /api/github/push</code></td><td>Guard + session</td><td>Create/choose repo, merge, push</td><td>1020</td></tr>
+    <tr><td><code>GET /*</code></td><td>none</td><td>SPA fallback → <code>index.html</code></td><td>1277</td></tr>
+  </table></div>
+  <div class="callout bad"><b>Documented but not implemented</b><p><code>public/feedback.js</code> calls <code>POST /api/feedback</code>, <code>POST /api/contribute</code>, <code>GET /api/public/contact</code>, and <code>AUDIT_FEATURES.md</code> describes them, but none exist in <code>server.js</code> and <code>feedback.js</code> is not loaded by <code>index.html</code>. The <code>feedback/</code> and <code>contribute/</code> dirs are empty placeholders.</p></div>
+</section>
+
+<section id="frontend">
+  <h2>Frontend</h2>
+  <p class="sub">Vanilla JS, no build step. <code>public/</code> is deployed as-is to GitHub Pages and served by Express.</p>
+  <div class="grid g2">
+    <div class="card"><h3>Pages &amp; scripts</h3><ul>
+      <li><code>index.html</code> + <code>app.js</code>: dashboard (projects, details, snapshots, dialogs). <b>app.js is dense one-liner functions</b>; reformat before large edits.</li>
+      <li><code>login.html</code> + <code>login.js</code>: backend-URL setup (for Pages), starts OAuth, exchanges <code>?code=</code>, handles native nonce.</li>
+      <li><code>theme.js</code>: system/light/dark in <code>localStorage gpp_theme</code></li>
+      <li><code>sw.js</code>: shell cache <code>gpp-shell-v7</code>; API calls bypass cache</li>
+    </ul></div>
+    <div class="card"><h3>How the client talks to the API</h3><ul>
+      <li><code>API_BASE</code> = <code>GPP_CONFIG.API_BASE</code> or saved <code>gpp_app_url</code>, else same origin</li>
+      <li><code>api()</code> adds <code>Authorization: Bearer gpp_access_token</code> and <code>credentials:'include'</code></li>
+      <li>SSE events clear per-project history cache then call <code>refresh()</code></li>
+      <li>Repo list cached 2 min client-side</li>
+    </ul></div>
+  </div>
+  <div class="callout info"><b>CSP is strict</b><p>Both Helmet and a <code>&lt;meta&gt;</code> tag enforce <code>script-src 'self'; style-src 'self'</code>. No inline scripts or style attributes in HTML; new origins for <code>connect-src</code> must be added in <b>both</b> places.</p></div>
+</section>
+
+<section id="files">
+  <h2>File map</h2>
+  <div class="tree">GitHub_Pusher/
+├─ server.js                <i>entire backend (auth, projects, git, sync, SSE)</i>
+├─ public/                  <i>frontend, also the GitHub Pages artifact</i>
+│  ├─ index.html · app.js · styles.css        <i>dashboard</i>
+│  ├─ login.html · login.js · login.css       <i>sign-in &amp; code exchange</i>
+│  ├─ config.js             <i>API_BASE + Supabase publishable key (unused by app)</i>
+│  ├─ sw.js · manifest.webmanifest · theme.js
+│  └─ feedback.js           <i>orphaned – endpoints missing</i>
+├─ supabase/schema.sql      <i>tables, indexes, RLS, bucket</i>
+├─ electron/main.cjs        <i>desktop shell, deep-link OAuth handoff</i>
+├─ android/ · native/android/ · capacitor.config.ts
+├─ scripts/                 <i>verify-project, build/prepare/configure android</i>
+├─ application/&lt;platform&gt;/  <i>drop installers here → auto-listed in UI</i>
+├─ .github/workflows/       <i>verify, pages, codeql, release, per-OS builds</i>
+├─ render.yaml · Dockerfile · docker-compose.yml · .env.example
+├─ docs/ · AUDIT_*.md · SECURITY.md · DEPLOYMENT.md
+└─ platform-oauth-patch/    <i>templates for native OAuth fix (apply-fixes.mjs)</i></div>
+</section>
+
+<section id="gotchas">
+  <h2>Gotchas before you change anything</h2>
+  <p class="sub">Verified against the code, ordered by how likely they are to bite.</p>
+  <div class="grid g2">
+    <div class="callout bad"><b>1. Build folders are silently dropped</b><p><code>ARCHIVE_SKIP_NAMES</code> (<code>node_modules, build, dist, target, .venv, .cache, .next, .gradle, .m2, __pycache__</code>) are skipped when the <i>first</i> path component matches, so a project's top-level <code>dist/</code> or <code>build/</code> is never stored or pushed.</p><p><b>Do you need them stored?</b> Usually no: they are regenerated and normally git-ignored. Yes if a project <i>commits</i> them (static sites publishing <code>dist/</code>, checked-in <code>build/</code> output). If so, remove just <code>'build'</code> and <code>'dist'</code> from the set (server.js:446); keep the heavy ones (<code>node_modules, target, .gradle, .venv</code>). Cost: bigger archives against the 200–500 MB limit.</p><p><b>Heads up:</b> this interacts with gotcha 2, see the warning there.</p></div>
+    <div class="callout bad"><b>2. Docs say .git is archived; code excludes it</b><p><code>docs/ARCHITECTURE.md</code> claims the working tree "including .git" is stored. In code, <code>persistWorkingTree</code> calls <code>createArchive(…, false)</code>. Git history is rebuilt from the remote on each run.</p><p><b>Decision: include .git.</b> Change <code>false</code> → <code>true</code> in <code>persistWorkingTree</code> (server.js:538); snapshots keep <code>false</code>. <code>sanitizeGitRepository</code> already strips config/hooks on restore, so this is safe. Effects: restored workspaces have a real HEAD, so sync no longer takes the "no local commit" branch and "dirty" finally means real local edits; fetches become incremental.</p><p class="bad" style="color:var(--bad)"><b>Must-fix together:</b> if <code>.git</code> tracks <code>dist/</code> or <code>build/</code> but the archive skips them, the next <code>git add -A</code> sees them as deleted and the push removes them from the remote repo. Either stop skipping those two names, or make the skip apply only to untracked paths. Also expect a one-time migration: existing archives have no <code>.git</code>, so the first run after the change behaves like today.</p></div>
+    <div class="callout bad"><b>3. Push is a force-push</b><p><code>git push -f</code> is <b>always</b> used, not only on conflict. How the cases actually play out:</p>
+<ul style="color:var(--muted);font-size:14px;margin:6px 0 6px;padding-left:18px"><li><b>No conflict:</b> remote is merged in first, so the push is effectively a fast-forward; <code>-f</code> changes nothing.</li><li><b>Merge conflict:</b> the code catches the failed <code>pull</code>, runs <code>checkout --ours</code> (your local version of conflicting files), commits, then pushes. Your side wins; the remote's version of those lines is overwritten. Nothing stops or asks.</li><li><b>Fetch fails</b> (network, expired token): the error is swallowed (<code>.catch(()=>{})</code>), so no remote ref is seen, the merge is skipped, and <code>-f</code> overwrites the remote branch with local history. This is the real danger.</li></ul>
+<p>Mitigation if you want it: stop swallowing the fetch error and/or use <code>--force-with-lease</code>. Always test merge-logic changes on a throwaway repo.</p></div>
+    <div class="callout bad"><b>4. Supabase is required even locally</b><p>Without <code>SUPABASE_URL</code> + key the server boots (outside production) but every auth/project route throws "Supabase persistence is not configured."</p></div>
+    <div class="callout"><b>5. In-memory state = one instance</b><p><code>projectLocks</code>, <code>clients</code> (SSE), <code>syncRunning</code>. Horizontal scaling needs DB locks / pub-sub first.</p></div>
+    <div class="callout"><b>6. Secrets are coupled</b><p>Changing <code>SESSION_SECRET</code> invalidates all sessions. If <code>TOKEN_ENCRYPTION_KEY</code> is unset it is derived from <code>SESSION_SECRET</code>, so rotating one breaks stored GitHub tokens.</p></div>
+    <div class="callout"><b>7. CORS allows only GET, POST, DELETE</b><p>Adding PUT/PATCH routes needs <code>Access-Control-Allow-Methods</code> updated (server.js:84) or Pages/native clients fail preflight.</p></div>
+    <div class="callout"><b>8. Schema drift is tolerated for two columns</b><p><code>dbUpsertProject</code> retries without <code>last_*_change_at</code> if missing. Any new column gets no such fallback: update <code>schema.sql</code> and run it in Supabase first.</p></div>
+    <div class="callout"><b>9. Service worker cache</b><p>Changing any <code>public/</code> asset? Bump <code>CACHE</code> in <code>sw.js</code> and keep its <code>ASSETS</code> list in sync, or users keep stale JS.</p></div>
+    <div class="callout"><b>10. Limits differ by file</b><p><code>MAX_TOTAL_UPLOAD_MB</code> defaults to 500 in code but 200 in <code>.env.example</code>/<code>render.yaml</code>; the bucket limit is 200 MB in schema.sql. Large projects fall back to "Cloud backup skipped" with <code>storagePath = null</code>.</p></div>
+    <div class="callout"><b>11. No tests, no rate limiting</b><p>CI only runs <code>node --check</code>. Rate limiting was deliberately left out (AUDIT_REPORT.md).</p></div>
+    <div class="callout"><b>12. Snapshots are write-only</b><p>They are created and listed but there is no restore/download endpoint. Anonymous sessions (<code>createAnonymous</code>) are supported in code but never used.</p></div>
+  </div>
+  <div class="callout ok"><b>Security invariants worth preserving</b><p>PKCE + one-time state, browser-binding cookie, hashed session/code/ticket storage, git config/hooks sanitised before every git command, archive limits (entries, expanded size, ratio, depth, no links/devices), path-traversal checks on upload, askpass script instead of tokens in URLs.</p></div>
+</section>
+
+<section id="recipes">
+  <h2>Change recipes</h2>
+  <p class="sub">Where to edit for the most common kinds of work.</p>
+  <div class="tw"><table>
+    <tr><th>If you want to…</th><th>Touch</th><th>Watch out for</th></tr>
+    <tr><td>Add an API route</td><td><code>server.js</code> (before the error handler ~1256), call from <code>app.js</code> via <code>api()</code></td><td>Use <code>authUser</code>, ownership check <code>String(project.userId)===String(a.user.id)</code>, <code>ensureRequestProtection</code> on mutations, CORS methods</td></tr>
+    <tr><td>Add a project field</td><td><code>schema.sql</code>, <code>projectFromRow</code>, <code>projectToRow</code>, <code>renderDetails()</code></td><td>Run SQL in Supabase before deploying</td></tr>
+    <tr><td>Change git behaviour</td><td><code>/api/github/push</code> and <code>syncProjectForUser</code> (two near-duplicate merge paths)</td><td>Keep both in sync; always use <code>withProjectLock</code> + <code>withWorkspace</code></td></tr>
+    <tr><td>Add snapshot restore</td><td>New route using <code>storageDownload</code> + <code>extractArchive</code>; UI in <code>loadHistory()</code></td><td>Take a "before-restore" snapshot; hold the lock; re-persist working tree</td></tr>
+    <tr><td>Push realtime events</td><td><code>broadcast(userId,{type,…})</code>; handle in <code>es.onmessage</code></td><td>Unknown types are ignored client-side</td></tr>
+    <tr><td>Add a config/env var</td><td>Read in top of <code>server.js</code>; add to <code>.env.example</code> and <code>render.yaml</code></td><td>Keep defaults consistent across files</td></tr>
+    <tr><td>Change OAuth scopes / redirect</td><td><code>GITHUB_OAUTH_SCOPE</code>, <code>GITHUB_CALLBACK_URL</code>, <code>allowedReturnTo</code></td><td>Native flow uses <code>com.githubprojectpusher.app://auth/callback</code> in server, Electron and Android manifest</td></tr>
+    <tr><td>Implement feedback/contribute</td><td>New routes + files under <code>feedback/</code>, <code>contribute/</code>; load <code>feedback.js</code> in HTML</td><td>Add to <code>sw.js</code> ASSETS; CSP forbids inline script</td></tr>
+    <tr><td>Fix a UI bug</td><td><code>public/app.js</code>, <code>styles.css</code></td><td>Bump SW cache version; test light &amp; dark themes</td></tr>
+  </table></div>
+</section>
+
+<section id="run">
+  <h2>Run, verify &amp; deploy</h2>
+  <div class="grid g2">
+    <div class="card"><h3>Run locally</h3>
+      <div class="step"><span class="n">1</span><p>Create a Supabase project; run <b>supabase/schema.sql</b> in its SQL editor.</p></div>
+      <div class="step"><span class="n">2</span><p>Create a GitHub OAuth app; callback <code>http://localhost:4173/auth/github/callback</code>.</p></div>
+      <div class="step"><span class="n">3</span><p>Copy <code>.env.example</code> → <code>.env</code> (set <code>NODE_ENV</code> to development, <code>SUPABASE_*</code>, <code>GITHUB_*</code>).</p></div>
+      <div class="step"><span class="n">4</span><p><code>npm install &amp;&amp; npm start</code> → <code>http://localhost:4173</code>. Needs <code>git</code> on PATH, Node 22.</p></div>
+    </div>
+    <div class="card"><h3>Verify &amp; ship</h3>
+      <ul><li><code>npm run test:syntax</code> (also <code>node scripts/verify-project.mjs</code>)</li>
+      <li>CI: <code>verify.yml</code> on <code>master</code> / <code>fix/**</code>; CodeQL; Pages deploys <code>public/</code></li>
+      <li>Backend: Render (<code>render.yaml</code>, health check <code>/api/health</code>) or Docker</li>
+      <li>Frontend: Pages needs <code>API_BASE</code> in <code>config.js</code> and <code>FRONTEND_URL</code> on the backend</li>
+      <li>Native: <code>npm run desktop</code>, <code>build:desktop</code>, <code>build:android</code>; they load the hosted Render URL</li></ul>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11.15.0/dist/mermaid.esm.min.mjs";
+mermaid.initialize({startOnLoad:false,theme:"dark",securityLevel:"strict",themeVariables:{primaryColor:"#19243b",primaryBorderColor:"#8b5cf6",primaryTextColor:"#eef2ff",lineColor:"#9aa8c0",secondaryColor:"#141c30",tertiaryColor:"#0e1628"}});
+await mermaid.run({nodes:document.querySelectorAll(".mermaid")});
+</script>
+</body>
+</html>

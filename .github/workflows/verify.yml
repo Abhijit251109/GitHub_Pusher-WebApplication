@@ -28,3 +28,5 @@ jobs:
         run: npm ci --no-audit --no-fund
       - name: Check JavaScript syntax
         run: npm run test:syntax
+      - name: Push safety regression tests
+        run: npm test

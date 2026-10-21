@@ -1,0 +1,258 @@
+// Regression tests for the "push creates an empty repository" bug and related push/sync safety.
+// Uses real git with local bare repositories standing in for GitHub; no network or Supabase.
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
+import { execFile } from 'child_process';
+import { promisify } from 'util';
+import { buildManifest, verifyRestoredWorkspace, performPush, commitAndPush, planPull, PushError } from '../lib/push-core.js';
+
+const execFileAsync = promisify(execFile);
+const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: '0' };
+
+function gitIn(dir) {
+  return (args, { input } = {}) => {
+    const run = execFileAsync('git', args, { cwd: dir, env: GIT_ENV, maxBuffer: 50 * 1024 * 1024 });
+    if (input != null) run.child.stdin.end(input);
+    return run;
+  };
+}
+async function tmp(prefix) { return fs.mkdtemp(path.join(os.tmpdir(), `gpp-test-${prefix}-`)); }
+async function write(root, files) {
+  for (const [rel, content] of Object.entries(files)) {
+    await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
+    await fs.writeFile(path.join(root, rel), content);
+  }
+}
+async function prepareGit(dir, url) {
+  const git = gitIn(dir);
+  await git(['init', '-q']);
+  await git(['config', 'user.name', 'Test']);
+  await git(['config', 'user.email', 'test@localhost']);
+  await git(['remote', 'add', 'origin', url]);
+}
+async function bareRepo() {
+  const dir = await tmp('remote');
+  await gitIn(dir)(['init', '-q', '--bare', '-b', 'main']);
+  return dir;
+}
+// Commits files to the remote from a separate clone, as if someone edited on GitHub.
+async function commitToRemote(remote, files, remove = []) {
+  const clone = await tmp('clone');
+  await execFileAsync('git', ['clone', '-q', remote, clone], { env: GIT_ENV });
+  const git = gitIn(clone);
+  await git(['config', 'user.name', 'Other']);
+  await git(['config', 'user.email', 'other@localhost']);
+  await git(['checkout', '-q', '-B', 'main']);
+  await write(clone, files);
+  for (const rel of remove) await git(['rm', '-q', rel]);
+  await git(['add', '-A']);
+  await git(['commit', '-q', '-m', 'remote edit']);
+  await git(['push', '-q', 'origin', 'main']);
+  return (await git(['rev-parse', 'HEAD'])).stdout.trim();
+}
+async function remoteFiles(remote, ref = 'main') {
+  try {
+    const { stdout } = await gitIn(remote)(['ls-tree', '-r', '--name-only', ref]);
+    return stdout.split('\n').filter(Boolean).sort();
+  } catch { return []; }
+}
+async function remoteFile(remote, rel) { return (await gitIn(remote)(['show', `main:${rel}`])).stdout; }
+
+// A workspace that is a copy of `files`, the way withWorkspace hands one to the push flow.
+function workspaceOf(files) {
+  return async (_project, fn) => {
+    const dir = await tmp('work');
+    await write(dir, files);
+    return fn(dir);
+  };
+}
+function pushDeps({ remote, files, created = false, overrides = {} }) {
+  const calls = { resolveRepo: 0, deleteRepo: 0 };
+  const deps = {
+    withWorkspace: workspaceOf(files),
+    prepareGit,
+    async resolveRepo() { calls.resolveRepo++; return { repo: { clone_url: remote, full_name: 'me/repo', html_url: 'https://github.test/me/repo', default_branch: 'main' }, created }; },
+    async deleteRepo() { calls.deleteRepo++; },
+    gitFor: (dir, fn) => fn(gitIn(dir)),
+    ...overrides
+  };
+  return { deps, calls };
+}
+async function push(project, opts, extra = {}) {
+  return performPush({ project, branch: 'main', message: 'sync', ...extra, deps: opts.deps });
+}
+
+test('a failed restore aborts before any GitHub repository is resolved or created', async () => {
+  const { deps, calls } = pushDeps({ remote: await bareRepo(), files: {} , overrides: {
+    withWorkspace: async () => { throw new PushError('RESTORE_FAILED', 'Storage download failed', { status: 502 }); }
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), { code: 'RESTORE_FAILED' });
+  assert.equal(calls.resolveRepo, 0);
+});
+
+test('an empty workspace is refused and no repository is created', async () => {
+  const remote = await bareRepo();
+  const { deps, calls } = pushDeps({ remote, files: {} });
+  await assert.rejects(push({ id: 'p' }, { deps }), { code: 'WORKSPACE_EMPTY' });
+  assert.equal(calls.resolveRepo, 0);
+  assert.deepEqual(await remoteFiles(remote), []);
+});
+
+test('a partially restored workspace fails the manifest check', async () => {
+  const dir = await tmp('manifest');
+  await write(dir, { 'a.txt': 'a', 'src/b.js': 'b', 'node_modules/x/index.js': 'skipped' });
+  const manifest = await buildManifest(dir);
+  assert.equal(manifest.fileCount, 2);
+  await verifyRestoredWorkspace(dir, manifest);
+  await fs.rm(path.join(dir, 'src/b.js'));
+  await assert.rejects(verifyRestoredWorkspace(dir, manifest), { code: 'WORKSPACE_INCOMPLETE' });
+  await assert.rejects(verifyRestoredWorkspace(await tmp('empty'), null), { code: 'WORKSPACE_EMPTY' });
+});
+
+test('first push to a new repository lands every file and is verified', async () => {
+  const remote = await bareRepo();
+  const { deps } = pushDeps({ remote, files: { 'index.html': '<h1>hi</h1>', 'src/app.js': 'x()' } });
+  const result = await push({ id: 'p' }, { deps });
+  assert.equal(result.outcome, 'pushed');
+  assert.deepEqual(await remoteFiles(remote), ['index.html', 'src/app.js']);
+  assert.equal((await gitIn(remote)(['rev-parse', 'main'])).stdout.trim(), result.commit);
+});
+
+test('pushing into a repository with a README keeps it and never rewrites history', async () => {
+  const remote = await bareRepo();
+  const readmeCommit = await commitToRemote(remote, { 'README.md': '# repo' });
+  const { deps } = pushDeps({ remote, files: { 'app.py': 'print(1)' } });
+  const result = await push({ id: 'p' }, { deps });
+  assert.deepEqual(await remoteFiles(remote), ['README.md', 'app.py']);
+  await gitIn(remote)(['merge-base', '--is-ancestor', readmeCommit, result.commit]);
+});
+
+test('differing files with no shared history are a conflict until the user chooses', async () => {
+  const remote = await bareRepo();
+  await commitToRemote(remote, { 'README.md': '# theirs' });
+  const { deps } = pushDeps({ remote, files: { 'README.md': '# mine', 'a.txt': 'a' } });
+  await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'CONFLICT' && e.details.conflicts.includes('README.md'));
+  assert.deepEqual(await remoteFiles(remote), ['README.md']);
+  const result = await push({ id: 'p' }, { deps }, { keepLocalOnConflict: true });
+  assert.deepEqual(result.overwritten, ['README.md']);
+  assert.equal(await remoteFile(remote, 'README.md'), '# mine');
+});
+
+test('pushing unchanged files reports no-changes and creates no commit', async () => {
+  const remote = await bareRepo();
+  const files = { 'a.txt': 'a' };
+  const first = await push({ id: 'p' }, pushDeps({ remote, files }));
+  const project = { id: 'p', lastPushedCommit: first.commit, lastPushedAt: new Date().toISOString() };
+  const second = await push(project, pushDeps({ remote, files }));
+  assert.equal(second.outcome, 'no-changes');
+  assert.equal((await gitIn(remote)(['rev-parse', 'main'])).stdout.trim(), first.commit);
+});
+
+test('remote edits the user did not touch are kept, not reverted', async () => {
+  const remote = await bareRepo();
+  const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1', 'b.txt': 'b1', 'gone.txt': 'g' } }));
+  await commitToRemote(remote, { 'a.txt': 'a2-remote', 'new-remote.txt': 'n' });
+  const project = { id: 'p', lastPushedCommit: first.commit, lastPushedAt: new Date().toISOString() };
+  // Stored copy is stale for a.txt, edits b.txt, deletes gone.txt.
+  await push(project, pushDeps({ remote, files: { 'a.txt': 'a1', 'b.txt': 'b2-local' } }));
+  assert.equal(await remoteFile(remote, 'a.txt'), 'a2-remote');
+  assert.equal(await remoteFile(remote, 'b.txt'), 'b2-local');
+  assert.deepEqual(await remoteFiles(remote), ['a.txt', 'b.txt', 'new-remote.txt']);
+});
+
+test('the same file edited on both sides is a conflict', async () => {
+  const remote = await bareRepo();
+  const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1' } }));
+  await commitToRemote(remote, { 'a.txt': 'a2-remote' });
+  const project = { id: 'p', lastPushedCommit: first.commit, lastPushedAt: new Date().toISOString() };
+  await assert.rejects(push(project, pushDeps({ remote, files: { 'a.txt': 'a2-local' } })), { code: 'CONFLICT' });
+  assert.equal(await remoteFile(remote, 'a.txt'), 'a2-remote');
+});
+
+test('generated folders committed on GitHub are not deleted by a push', async () => {
+  const remote = await bareRepo();
+  await commitToRemote(remote, { 'dist/bundle.js': 'built', 'a.txt': 'a' });
+  await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a', 'b.txt': 'b' } }));
+  assert.deepEqual(await remoteFiles(remote), ['a.txt', 'b.txt', 'dist/bundle.js']);
+});
+
+test('a branch that moves during the push is never overwritten', async () => {
+  const remote = await bareRepo();
+  await commitToRemote(remote, { 'a.txt': 'a' });
+  let raced = false;
+  const { deps } = pushDeps({ remote, files: { 'a.txt': 'a', 'b.txt': 'b' }, overrides: {
+    gitFor: (dir, fn) => {
+      const git = gitIn(dir);
+      return fn(async (args, opts) => {
+        if (args[0] === 'push' && !raced) { raced = true; await commitToRemote(remote, { 'c.txt': 'someone else' }); }
+        return git(args, opts);
+      });
+    }
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), { code: 'REMOTE_CHANGED' });
+  assert.deepEqual(await remoteFiles(remote), ['a.txt', 'c.txt']);
+});
+
+test('a repository created for a push that fails is cleaned up', async () => {
+  const remote = await bareRepo();
+  const { deps, calls } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: {
+    gitFor: async () => { throw new PushError('PUSH_FAILED', 'denied', { status: 502 }); }
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'PUSH_FAILED' && /deleted/.test(e.details.cleanup));
+  assert.equal(calls.deleteRepo, 1);
+});
+
+test('when the cleanup itself fails the user is told the empty repository exists', async () => {
+  const remote = await bareRepo();
+  const { deps } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: {
+    gitFor: async () => { throw new PushError('PUSH_FAILED', 'denied', { status: 502 }); },
+    deleteRepo: async () => { throw new Error('Must have admin rights'); }
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), e => /was created on GitHub but nothing was pushed/.test(e.details.cleanup));
+});
+
+test('a remote tree count mismatch fails verification', async () => {
+  const remote = await bareRepo();
+  const { deps } = pushDeps({ remote, files: { 'a.txt': 'a' }, overrides: { remoteTreeCount: async () => ({ count: 0, truncated: false }) } });
+  await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'VERIFY_FAILED' && e.details.pushed === true);
+});
+
+async function pullInto(remote, files, knownCommit) {
+  const dir = await tmp('sync');
+  await write(dir, files);
+  await prepareGit(dir, remote);
+  const plan = await planPull({ git: gitIn(dir), dir, branch: 'main', knownCommit });
+  return { dir, plan };
+}
+
+test('auto-pull applies remote changes only when the stored copy is unedited', async () => {
+  const remote = await bareRepo();
+  const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1', 'b.txt': 'b1' } }));
+  const tip = await commitToRemote(remote, { 'a.txt': 'a2', 'c.txt': 'c' }, ['b.txt']);
+
+  const clean = await pullInto(remote, { 'a.txt': 'a1', 'b.txt': 'b1' }, first.commit);
+  assert.equal(clean.plan.action, 'pulled');
+  assert.equal(clean.plan.remote, tip);
+  assert.equal(await fs.readFile(path.join(clean.dir, 'a.txt'), 'utf8'), 'a2');
+  assert.equal(await fs.readFile(path.join(clean.dir, 'c.txt'), 'utf8'), 'c');
+  await assert.rejects(fs.access(path.join(clean.dir, 'b.txt')));
+
+  const edited = await pullInto(remote, { 'a.txt': 'a1', 'b.txt': 'b1-local' }, first.commit);
+  assert.equal(edited.plan.action, 'conflict');
+  assert.equal(await fs.readFile(path.join(edited.dir, 'b.txt'), 'utf8'), 'b1-local');
+  assert.equal(await fs.readFile(path.join(edited.dir, 'a.txt'), 'utf8'), 'a1');
+
+  const upToDate = await pullInto(remote, { 'a.txt': 'a2', 'c.txt': 'c' }, tip);
+  assert.equal(upToDate.plan.action, 'none');
+});
+
+test('direct commitAndPush refuses to commit an empty tree', async () => {
+  const remote = await bareRepo();
+  const dir = await tmp('direct');
+  await prepareGit(dir, remote);
+  await assert.rejects(commitAndPush({ git: gitIn(dir), dir, branch: 'main', message: 'x' }), { code: 'WORKSPACE_EMPTY' });
+  assert.deepEqual(await remoteFiles(remote), []);
+});
