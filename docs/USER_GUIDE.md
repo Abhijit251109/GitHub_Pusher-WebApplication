@@ -25,7 +25,7 @@ Push safety rules:
 - Pushes never force-overwrite GitHub. Your commit is built on top of the branch's current history. If someone else pushes while yours is running, the push stops and asks you to try again.
 - Files changed on GitHub that you did not change are kept. If the same file changed in both places, the push stops and lists the files. You then choose to overwrite them with your versions or cancel.
 - A push only reports success after GitHub shows the new commit with the expected number of files. If nothing changed, it says so instead of making an empty commit.
-- If a push into a repository it just created fails, the app tries to delete that empty repository. Deleting needs the `delete_repo` scope in `GITHUB_OAUTH_SCOPE`; without it the error message says the empty repository exists and links to it.
+- If a push into a repository it just created fails, the app deletes that repository, but only after confirming on GitHub that nothing landed in it. Deleting needs the `delete_repo` scope in `GITHUB_OAUTH_SCOPE`. If the push was cut off by a timeout, or the repository can't be deleted, the error message links to the repository so you can check it.
 
 ## Automatic pull
 

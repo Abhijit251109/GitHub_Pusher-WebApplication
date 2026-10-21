@@ -12,7 +12,7 @@
     "build:android": "node scripts/build-android.mjs",
     "prepare:android": "node scripts/prepare-android.mjs",
     "test": "node --test scripts/test-push-safety.mjs scripts/test-security.mjs",
-    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check public/app.js"
+    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check lib/git.js && node --check public/app.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.57.4",

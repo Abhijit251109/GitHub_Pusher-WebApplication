@@ -8,7 +8,7 @@ import crypto from 'crypto';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, errorResponse, AppError } from '../lib/security.js';
+import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, errorResponse, AppError, envInt } from '../lib/security.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -76,6 +76,16 @@ test('unexpected errors are replaced by a generic message with a reference id', 
   assert.deepEqual(known, { status: 409, body: { error: 'Pick a side.', code: 'CONFLICT' } });
 });
 
+test('integer settings: unset uses the default, anything not a whole number in range is refused', () => {
+  assert.equal(envInt({}, 'X', 7), 7);
+  assert.equal(envInt({ X: '' }, 'X', 7), 7);
+  assert.equal(envInt({ X: ' 12 ' }, 'X', 7), 12);
+  for (const bad of ['abc', '0', '-3', '1.5', '1e3', '0x10', '99999999999999999999']) {
+    assert.throws(() => envInt({ X: bad }, 'X', 7), /X must be a whole number/, bad);
+  }
+  assert.throws(() => envInt({ X: '70000' }, 'X', 1, { max: 65535 }), /between 1 and 65535/);
+});
+
 // ---------- end to end: real server, mocked Supabase ----------
 
 const SESSION_SECRET = 'e2e-session-secret-'.padEnd(48, 'x');
@@ -100,20 +110,61 @@ const byHash = new Map(Object.values(users).map(u => [tokenHash(u.token), u]));
 const byProject = new Map(Object.values(users).map(u => [u.projectId, u]));
 const counters = { oauthInserts: 0, storageReads: 0 };
 
+// Seeded projects (u1-u6) have failing Storage; anything else lives in this in-memory store, so a
+// real upload followed by a delete can be checked end to end.
+const store = new Map(); // object path -> Buffer
+const projectRows = new Map(); // id -> row written by the server
+// u7 uploads and deletes a real project; u8 probes unknown project ids. Neither has seeded data.
+users.u7 = { token: 'token-u7', id: '1007', projectId: null };
+users.u8 = { token: 'token-u8', id: '1008', projectId: null };
+byHash.set(tokenHash(users.u7.token), users.u7);
+byHash.set(tokenHash(users.u8.token), users.u8);
+
+async function storageRoute(req, res, rest, body, send) {
+  const BUCKET = 'gpp-private/';
+  if (req.method === 'POST' && rest.startsWith('list/')) {
+    const { prefix = '' } = JSON.parse(body.toString() || '{}');
+    const dir = prefix.replace(/\/$/, '') + '/';
+    const names = [...store.keys()].filter(k => k.startsWith(dir) && !k.slice(dir.length).includes('/')).map(k => k.slice(dir.length));
+    return send(200, names.map(name => ({ name, id: `id-${name}`, metadata: { size: store.get(dir + name).length } })));
+  }
+  if (req.method === 'DELETE') {
+    const { prefixes = [] } = JSON.parse(body.toString() || '{}');
+    const removed = prefixes.filter(p => store.delete(p));
+    return send(200, removed.map(name => ({ name })));
+  }
+  if (req.method === 'GET' && rest.startsWith('info/' + BUCKET)) {
+    const key = decodeURIComponent(rest.slice(('info/' + BUCKET).length));
+    return store.has(key) ? send(200, { name: key, size: store.get(key).length }) : send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+  }
+  const key = decodeURIComponent(rest.slice(BUCKET.length));
+  if (req.method === 'POST' || req.method === 'PUT') { store.set(key, body); return send(200, { Key: BUCKET + key }); }
+  if (store.has(key)) { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.end(store.get(key)); }
+  return send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+}
+
 function mockSupabase() {
   return http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://mock');
     const send = (status, body) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(body === undefined ? '' : JSON.stringify(body)); };
-    for await (const _ of req) { /* drain */ }
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const body = Buffer.concat(chunks);
     const eq = name => (url.searchParams.get(name) || '').replace(/^eq\./, '');
     if (url.pathname.startsWith('/storage/v1/object/')) {
+      const owner = Object.values(users).find(u => u.projectId && url.pathname.includes(u.projectId));
+      if (!owner) return storageRoute(req, res, url.pathname.slice('/storage/v1/object/'.length), body, send);
       counters.storageReads++;
-      const owner = Object.values(users).find(u => url.pathname.includes(u.projectId));
-      await new Promise(r => setTimeout(r, owner?.slow ? 1500 : 10));
-      if (owner?.legacy && url.pathname.endsWith('/manifest.json')) return send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+      await new Promise(r => setTimeout(r, owner.slow ? 1500 : 10));
+      if (owner.legacy && url.pathname.endsWith('/manifest.json')) return send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
       return send(500, { statusCode: '500', error: 'internal', message: `upstream s3://internal-bucket/${url.pathname} timed out at 10.0.3.7` });
     }
     const table = url.pathname.replace('/rest/v1/', '');
+    if (table === 'projects' && req.method === 'POST') {
+      for (const row of [].concat(JSON.parse(body.toString()))) projectRows.set(row.id, row);
+      return send(201, []);
+    }
+    if (table === 'projects' && req.method === 'DELETE') { projectRows.delete(eq('id')); return send(204); }
     if (req.method !== 'GET') {
       if (table === 'oauth_attempts') counters.oauthInserts++;
       return send(201, []);
@@ -127,6 +178,8 @@ function mockSupabase() {
       return send(200, u ? [{ id: u.id, login: `login-${u.id}`, name: 'Tester', avatar: '', github_token_enc: encrypt('gho_fake') }] : []);
     }
     if (table === 'projects') {
+      const stored = projectRows.get(eq('id'));
+      if (stored) return send(200, [stored]);
       const u = byProject.get(eq('id'));
       return send(200, u ? [{ id: u.projectId, user_id: u.id, name: 'proj', file_count: 3, storage_path: `projects/${u.id}/${u.projectId}/working.tgz`, sync_state: 'local' }] : []);
     }
@@ -262,4 +315,67 @@ test('e2e: a project stored before manifests existed still restores (missing man
   assert.equal((await r.json()).code, 'RESTORE_FAILED'); // the mock archive itself fails
   assert.equal(counters.storageReads - reads, 2, 'missing manifest falls through to the archive download');
   assert.match(serverLog, /working\.tgz: HTTP 500/);
+});
+
+const asUser = (user, method, path, body) => fetch(`${base}${path}`, {
+  method,
+  headers: { Authorization: `Bearer ${user.token}`, ...(body ? { 'Content-Type': 'application/json' } : {}) },
+  body: body ? JSON.stringify(body) : undefined
+});
+
+test('e2e: an unknown project id is a 404 PROJECT_NOT_FOUND on every route', async () => {
+  const id = crypto.randomUUID();
+  const responses = [
+    await asUser(users.u8, 'GET', `/api/projects/${id}/history`),
+    await asUser(users.u8, 'DELETE', `/api/projects/${id}`),
+    await asUser(users.u8, 'POST', '/api/github/fetch', { projectId: id }),
+    await asUser(users.u8, 'POST', '/api/github/push', { projectId: id })
+  ];
+  for (const r of responses) {
+    assert.equal(r.status, 404, r.url);
+    assert.deepEqual(await r.json(), { error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
+  }
+  assert.doesNotMatch(serverLog, /Cannot read properties of null/);
+});
+
+test('e2e: unknown API paths are JSON 404s, not the HTML app shell', async () => {
+  for (const [method, path] of [['GET', '/api/does-not-exist'], ['POST', '/api/projects/x/y/z'], ['DELETE', '/api/nope']]) {
+    const r = await fetch(`${base}${path}`, { method });
+    assert.equal(r.status, 404, `${method} ${path}`);
+    assert.match(r.headers.get('content-type'), /json/);
+    assert.deepEqual(await r.json(), { error: 'Not found.', code: 'NOT_FOUND' });
+  }
+  assert.match(await (await fetch(`${base}/some/page`)).text(), /<html/i, 'non-API paths still serve the app');
+});
+
+test('e2e: deleting a freshly uploaded project leaves no Storage objects behind', async () => {
+  const form = new FormData();
+  form.append('projectName', 'delete-me');
+  form.append('files', new Blob(['hello']), 'delete-me/a.txt');
+  form.append('files', new Blob(['world']), 'delete-me/src/b.txt');
+  const up = await fetch(`${base}/api/projects`, { method: 'POST', headers: { Authorization: `Bearer ${users.u7.token}` }, body: form });
+  const project = await up.json();
+  assert.equal(up.status, 200, JSON.stringify(project));
+  const folder = `projects/${users.u7.id}/${project.id}/`;
+  const before = [...store.keys()].filter(k => k.startsWith(folder)).sort();
+  assert.deepEqual(before, [`${folder}manifest.json`, `${folder}working.tgz`]);
+  store.set(`snapshots/${users.u7.id}/${project.id}/stray.tgz`, Buffer.from('x')); // e.g. a snapshot whose row was never written
+
+  const del = await asUser(users.u7, 'DELETE', `/api/projects/${project.id}`);
+  assert.deepEqual(await del.json(), { ok: true });
+  const left = [...store.keys()].filter(k => k.includes(project.id));
+  assert.deepEqual(left, []);
+  assert.equal(projectRows.has(project.id), false);
+});
+
+test('e2e: the server refuses to start with a non-numeric limit', async () => {
+  for (const [name, value] of [['MAX_CONCURRENT_JOBS', 'abc'], ['RATE_LIMIT_PUSH_PER_15_MIN', 'abc'], ['MAX_ARCHIVE_MB', '0'], ['GIT_TIMEOUT_MS', '1e9']]) {
+    const child = spawn(process.execPath, ['server.js'], { cwd: ROOT, env: { ...process.env, NODE_ENV: 'development', [name]: value }, stdio: ['ignore', 'pipe', 'pipe'] });
+    let output = '';
+    child.stdout.on('data', d => { output += d; });
+    child.stderr.on('data', d => { output += d; });
+    const code = await new Promise(resolve => child.on('exit', resolve));
+    assert.notEqual(code, 0, `${name}=${value} should stop startup`);
+    assert.match(output, new RegExp(`${name} must be a whole number`));
+  }
 });

@@ -205,13 +205,13 @@ test('a repository created for a push that fails is cleaned up', async () => {
   assert.equal(calls.deleteRepo, 1);
 });
 
-test('when the cleanup itself fails the user is told the empty repository exists', async () => {
+test('when the cleanup itself fails the user is told the repository exists', async () => {
   const remote = await bareRepo();
   const { deps } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: {
     gitFor: async () => { throw new PushError('PUSH_FAILED', 'denied', { status: 502 }); },
     deleteRepo: async () => { throw new Error('Must have admin rights'); }
   } });
-  await assert.rejects(push({ id: 'p' }, { deps }), e => /was created on GitHub but nothing was pushed/.test(e.details.cleanup));
+  await assert.rejects(push({ id: 'p' }, { deps }), e => /could not be deleted automatically/.test(e.details.cleanup));
 });
 
 test('a remote tree count mismatch fails verification', async () => {
@@ -365,4 +365,52 @@ test('a protected-branch rejection gets a specific safe message', async () => {
   await fs.chmod(hook, 0o755);
   const error = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a' } })).catch(e => e);
   assert.equal(error.message, 'The branch is protected on GitHub, so it cannot be pushed to directly.');
+});
+
+// ---------- timeouts: a hung git call is killed and never mistaken for an ordinary answer ----------
+
+test('a hung git call is killed after the per-call timeout', async () => {
+  const { createGitRunner } = await import('../lib/git.js');
+  const runGit = createGitRunner({ timeoutMs: 300, jobTimeoutMs: 60_000 });
+  const dir = await tmp('hang');
+  const started = Date.now();
+  // `hash-object --stdin` waits forever for input that never comes.
+  const error = await runGit(dir, ['hash-object', '--stdin']).catch(e => e);
+  assert.equal(error.code, 'GIT_TIMEOUT');
+  assert.equal(error.status, 504);
+  assert.match(error.internal, /GIT_TIMEOUT_MS/);
+  assert.ok(Date.now() - started < 5000);
+});
+
+test('the job deadline stops git calls even when each call is within its own limit', async () => {
+  const { createGitRunner } = await import('../lib/git.js');
+  const runGit = createGitRunner({ timeoutMs: 60_000, jobTimeoutMs: 200 });
+  const error = await runGit(await tmp('deadline'), ['hash-object', '--stdin'], {}, { signal: AbortSignal.timeout(200) }).catch(e => e);
+  assert.equal(error.code, 'GIT_TIMEOUT');
+  assert.match(error.internal, /JOB_TIMEOUT_MS/);
+});
+
+function timingOutOn(subcommand) {
+  return (dir, fn) => {
+    const git = gitIn(dir);
+    return fn(async (args, opts) => {
+      if (args[0] === subcommand) throw new PushError('GIT_TIMEOUT', 'A git operation took too long and was stopped.', { status: 504 });
+      return git(args, opts);
+    });
+  };
+}
+
+test('a timeout while reading the remote branch is not treated as "branch does not exist"', async () => {
+  const remote = await bareRepo();
+  await commitToRemote(remote, { 'README.md': '# theirs' });
+  const { deps } = pushDeps({ remote, files: { 'a.txt': 'a' }, overrides: { gitFor: timingOutOn('rev-parse') } });
+  await assert.rejects(push({ id: 'p' }, { deps }), { code: 'GIT_TIMEOUT' });
+  assert.deepEqual(await remoteFiles(remote), ['README.md'], 'nothing was pushed on a guessed base');
+});
+
+test('a repository created for a push that timed out is never auto-deleted', async () => {
+  const remote = await bareRepo();
+  const { deps, calls } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: { gitFor: timingOutOn('push') } });
+  await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'GIT_TIMEOUT' && /interrupted/.test(e.details.cleanup));
+  assert.equal(calls.deleteRepo, 0);
 });
