@@ -10,6 +10,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as tar from 'tar';
 import helmet from 'helmet';
 import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, performPush, planPull, lastKnownCommit } from './lib/push-core.js';
+import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, createJobGate, jobSlot, runJob, limiter } from './lib/security.js';
 
 const execFileAsync = promisify(execFile);
 const app = express();
@@ -52,7 +53,13 @@ const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_I
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
 const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
-if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
+const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
+if (TRUST_PROXY !== undefined) app.set('trust proxy', TRUST_PROXY);
+// Only these origins get credentialed CORS and pass ensureRequestProtection.
+const ORIGIN_POLICY = createOriginPolicy({ isProd, frontendUrl: FRONTEND_URL, publicBaseUrl: process.env.PUBLIC_BASE_URL });
+if (isProd && !FRONTEND_URL) console.warn('FRONTEND_URL is not set: a separately hosted frontend (e.g. GitHub Pages) will be refused. Set FRONTEND_URL to its URL.');
+const MAX_CONCURRENT_JOBS = Number(process.env.MAX_CONCURRENT_JOBS || 2);
+const JOB_GATE = createJobGate({ maxConcurrent: MAX_CONCURRENT_JOBS, maxPerUser: 1 });
 
 const SUPABASE_SERVER_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const hasSupabase = Boolean(process.env.SUPABASE_URL && SUPABASE_SERVER_KEY);
@@ -99,8 +106,6 @@ app.use(helmet({
       connectSrc: [
         "'self'",
         ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : []),
-        // Allow GitHub Pages origins in production
-        ...(isProd ? ['https://*.github.io'] : []),
         // Allow local development origins
         ...(!isProd ? ['http://localhost:*', 'http://127.0.0.1:*'] : [])
       ],
@@ -169,22 +174,7 @@ function decrypt(value) {
 function publicBaseUrl(req) {
   return String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 }
-function allowedOrigin(origin) {
-  try {
-    const normalized = new URL(origin).origin;
-    if (FRONTEND_ORIGIN && normalized === FRONTEND_ORIGIN) return true;
-    if (process.env.PUBLIC_BASE_URL && normalized === new URL(process.env.PUBLIC_BASE_URL).origin) return true;
-    // Allow GitHub Pages origins in production when FRONTEND_URL is not explicitly set
-    if (isProd && normalized.endsWith('.github.io')) return true;
-    // In development, allow localhost origins
-    if (!isProd) {
-      const localhostPorts = ['3000', '5173', '5174', '8080', '4173'];
-      if (normalized.startsWith('http://localhost:') && localhostPorts.includes(new URL(normalized).port)) return true;
-      if (normalized === 'http://localhost' || normalized === 'http://127.0.0.1:4173') return true;
-    }
-  } catch {}
-  return false;
-}
+function allowedOrigin(origin) { return ORIGIN_POLICY.allowed(origin); }
 function allowedReturnTo(value, req) {
   if (!value) return null;
   try {
@@ -433,7 +423,15 @@ async function storageUpload(objectPath, data, contentType = 'application/octet-
 async function storageDownload(objectPath) {
   supabaseRequired();
   const { data, error } = await supabase.storage.from(STORAGE_BUCKET).download(objectPath);
-  if (error || !data) throw new Error(`Storage download failed: ${error?.message || 'not found'}`);
+  if (error || !data) {
+    // Downloads report HTTP failures as a raw Response (message "{}"), so read status and body here.
+    const response = error?.originalError;
+    const status = typeof response?.status === 'number' ? response.status : null;
+    const body = status ? await response.text().catch(() => '') : '';
+    const failure = new Error(`Storage download failed for ${objectPath}: ${status ? `HTTP ${status} ${body}` : (error?.message || 'no data')}`.trim());
+    failure.notFound = !error || status === 404 || /not.?found/i.test(body);
+    throw failure;
+  }
   return Buffer.from(await data.arrayBuffer());
 }
 async function storageRemove(paths) {
@@ -454,7 +452,7 @@ function manifestPathFor(storagePath) { return path.posix.join(path.posix.dirnam
 async function loadManifest(storagePath) {
   let buf;
   try { buf = await storageDownload(manifestPathFor(storagePath)); } catch (e) {
-    if (/not found|does not exist|object not found/i.test(e.message)) return null; // stored before manifests existed
+    if (e.notFound) return null; // stored before manifests existed
     throw e;
   }
   return JSON.parse(buf.toString('utf8'));
@@ -543,9 +541,8 @@ async function withWorkspace(project, fn) {
         const { fileCount, legacy } = await verifyRestoredWorkspace(work, manifest);
         console.log(`withWorkspace: restored ${fileCount} files${legacy ? ' (no manifest, legacy project)' : ' (matches manifest)'} for project ${project.id}`);
       } catch (e) {
-        console.error(`withWorkspace: could not restore project ${project.id}: ${e.message}`);
         if (e instanceof PushError) throw e;
-        throw new PushError('RESTORE_FAILED', `The stored copy of this project could not be restored (${e.message}). Nothing was sent to GitHub.`, { status: 502 });
+        throw new PushError('RESTORE_FAILED', 'The stored copy of this project could not be restored from cloud storage. Nothing was sent to GitHub.', { status: 502, internal: e.message });
       }
     } else if (Number(project?.fileCount || 0) > 0) {
       throw new PushError('RESTORE_FAILED', 'This project has no stored copy in cloud storage (it was never saved successfully). Remove the project and add it again. Nothing was sent to GitHub.', { status: 422 });
@@ -638,12 +635,21 @@ async function githubFetch(url, options = {}) {
   const r = await fetch(url, options);
   const text = await r.text();
   let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!r.ok) {
-    const error = new Error((data && data.message) || `GitHub API error ${r.status}`);
-    error.status = r.status;
-    throw error;
-  }
+  if (!r.ok) throw githubError(r, data);
   return data;
+}
+// GitHub API failures as client-safe errors; GitHub's own text only goes to the log.
+function githubError(r, data) {
+  const internal = `GitHub API ${r.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`;
+  if (r.status === 401) return new AppError('GITHUB_UNAUTHORIZED', 'GitHub authorization has expired or was revoked. Reconnect GitHub.', { status: 401, internal });
+  if ((r.status === 403 || r.status === 429) && r.headers.get('x-ratelimit-remaining') === '0') return new AppError('GITHUB_RATE_LIMITED', 'GitHub rate limit reached. Try again later.', { status: 429, internal });
+  if (r.status === 403) return new AppError('GITHUB_FORBIDDEN', 'GitHub refused this action for your account.', { status: 403, internal });
+  if (r.status === 404) return new AppError('GITHUB_NOT_FOUND', 'The GitHub repository was not found or your account cannot access it.', { status: 404, internal });
+  if (r.status === 422) {
+    const exists = /already exists/i.test(JSON.stringify(data?.errors || data?.message || ''));
+    return new AppError('GITHUB_REJECTED', exists ? 'A repository with that name already exists on your account.' : 'GitHub rejected the request.', { status: 422, internal });
+  }
+  return new AppError('GITHUB_ERROR', 'GitHub is not responding normally. Try again in a moment.', { status: 502, internal });
 }
 async function userToken(user) {
   if (!user.githubTokenEnc) return null;
@@ -654,7 +660,9 @@ async function userToken(user) {
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, grant_type: 'refresh_token', refresh_token: refresh })
     });
     const data = await response.json();
-    if (!response.ok || data.error || !data.access_token) throw new Error(data.error_description || 'GitHub token refresh failed. Please reconnect GitHub.');
+    if (!response.ok || data.error || !data.access_token) {
+      throw new AppError('GITHUB_UNAUTHORIZED', 'GitHub authorization has expired. Reconnect GitHub.', { status: 401, internal: `Token refresh failed: ${data.error || response.status} ${data.error_description || ''}` });
+    }
     user.githubTokenEnc = encrypt(data.access_token);
     user.githubRefreshTokenEnc = data.refresh_token ? encrypt(data.refresh_token) : user.githubRefreshTokenEnc;
     user.githubExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
@@ -669,8 +677,31 @@ function ensureRequestProtection(req, res, next) {
   if (requestHasBearer(req)) return next();
   const origin = req.get('Origin');
   if (!origin || allowedOrigin(origin)) return next();
-  return res.status(403).json({ error: 'Cross-origin request blocked.' });
+  return res.status(403).json({ error: 'Cross-origin request blocked.', code: 'ORIGIN_NOT_ALLOWED' });
 }
+function sendError(res, e, context, fallback) {
+  const { status, body } = errorResponse(e, { context, fallback });
+  if (!res.headersSent) res.status(status).json(body);
+}
+// Resolves the signed-in user once, so per-user limits and job slots can key on it.
+async function requireUser(req, res, next) {
+  try {
+    const a = await authUser(req, res);
+    if (!a) return;
+    req.auth = a;
+    next();
+  } catch (e) { sendError(res, e, 'Authentication'); }
+}
+// Per-IP limits run before any database work; per-user limits run after requireUser.
+const MINUTE = 60 * 1000;
+const apiLimit = limiter({ windowMs: MINUTE, limit: Number(process.env.RATE_LIMIT_API_PER_MINUTE || 300) });
+const authLimit = limiter({ windowMs: 15 * MINUTE, limit: Number(process.env.RATE_LIMIT_AUTH_PER_15_MIN || 20), text: true });
+const exchangeLimit = limiter({ windowMs: 15 * MINUTE, limit: Number(process.env.RATE_LIMIT_AUTH_PER_15_MIN || 20) });
+const pushLimit = limiter({ windowMs: 15 * MINUTE, limit: Number(process.env.RATE_LIMIT_PUSH_PER_15_MIN || 20), key: 'user' });
+const fetchLimit = limiter({ windowMs: 15 * MINUTE, limit: Number(process.env.RATE_LIMIT_FETCH_PER_15_MIN || 30), key: 'user' });
+const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: Number(process.env.RATE_LIMIT_UPLOAD_PER_15_MIN || 10), key: 'user' });
+const heavyJob = jobSlot(JOB_GATE);
+app.use('/api', apiLimit);
 
 async function sanitizeGitRepository(dir) {
   const gitPath = path.join(dir, '.git');
@@ -764,10 +795,10 @@ app.get('/api/auth/me', async (req, res) => {
     const a = await authUser(req, res, false);
     if (!a) return res.json({ authenticated: false });
     return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
-  } catch (e) { return res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Session check'); }
 });
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
-app.get('/api/auth/login', async (req, res) => {
+app.get('/api/auth/login', authLimit, async (req, res) => {
   try {
     if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
     supabaseRequired();
@@ -802,10 +833,13 @@ app.get('/api/auth/login', async (req, res) => {
     u.searchParams.set('code_challenge_method', 'S256');
     u.searchParams.set('allow_signup', process.env.GITHUB_ALLOW_SIGNUP === 'false' ? 'false' : 'true');
     res.redirect(u.toString());
-  } catch (e) { res.status(500).send(`GitHub sign-in setup failed: ${e.message}`); }
+  } catch (e) {
+    const { body } = errorResponse(e, { context: 'Sign-in setup' });
+    res.status(500).type('text/plain').send(`GitHub sign-in could not start. ${body.error}`);
+  }
 });
 
-app.get('/auth/github/callback', async (req, res) => {
+app.get('/auth/github/callback', authLimit, async (req, res) => {
   try {
     supabaseRequired();
     if (!req.query.code || !req.query.state) return res.status(400).send('Missing OAuth code/state.');
@@ -821,7 +855,9 @@ app.get('/auth/github/callback', async (req, res) => {
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.query.code, state: req.query.state, redirect_uri: redirectUri, code_verifier: attempt.code_verifier })
     });
     const tokenData = await tokenResponse.json();
-    if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) throw new Error(tokenData.error_description || 'OAuth exchange failed.');
+    if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) {
+      throw new AppError('OAUTH_FAILED', 'GitHub did not accept the sign-in. Please try again.', { internal: `OAuth exchange failed: ${tokenData.error || tokenResponse.status} ${tokenData.error_description || ''}` });
+    }
     const ghUser = await githubFetch('https://api.github.com/user', { headers: githubHeaders(tokenData.access_token) });
     const userId = String(ghUser.id);
     if (REQUIRE_GITHUB_ALLOWLIST && !ALLOWED_GITHUB_USER_IDS.has(userId)) return res.status(403).send('This GitHub account is not authorized to use this application.');
@@ -843,18 +879,21 @@ app.get('/auth/github/callback', async (req, res) => {
     const token = await createSession(user.id);
     res.setHeader('Set-Cookie', [clearOAuthBindingCookie(), `${SESSION_COOKIE}=${token}; ${cookieOptions()}`]);
     return res.redirect('/');
-  } catch (e) { res.status(400).send(`GitHub sign-in failed: ${e.message}`); }
+  } catch (e) {
+    const { body } = errorResponse(e, { context: 'Sign-in callback' });
+    res.status(400).type('text/plain').send(`GitHub sign-in failed. ${body.error}`);
+  }
 });
-app.post('/api/auth/exchange', ensureRequestProtection, async (req, res) => {
+app.post('/api/auth/exchange', exchangeLimit, ensureRequestProtection, async (req, res) => {
   try {
-    const code = String(req.body?.code || '');
+    const code = parseOptionalString(req.body?.code, 'Login code', { max: 200 }) || '';
     if (!code) return res.status(400).json({ error: 'Missing login code.' });
     const row = await consumeLoginCode(code);
     if (!row) return res.status(401).json({ error: 'Login code is invalid or expired.' });
     const token = await createSession(row.user_id);
     const user = await dbGetUser(row.user_id);
     return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar } });
-  } catch (e) { return res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Login code exchange'); }
 });
 app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
   try {
@@ -863,10 +902,10 @@ app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
     await deleteSession(bearer || cookie);
     if (cookie) res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; ${cookieOptions()}; Max-Age=0`);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Logout'); }
 });
 
-app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { sendError(res, e, 'List applications'); } });
 app.get('/api/applications/download/:platform/:name', async (req, res) => {
   const { platform, name } = req.params;
   if (!validApplication(platform, name)) return res.status(404).json({ error: 'Application build not found.' });
@@ -876,7 +915,7 @@ app.get('/api/applications/download/:platform/:name', async (req, res) => {
 
 app.get('/api/events/ticket', async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
-  try { res.json({ ticket: await createSseTicket(a.user.id) }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json({ ticket: await createSseTicket(a.user.id) }); } catch (e) { sendError(res, e, 'Event ticket'); }
 });
 app.get('/api/events', async (req, res) => {
   try {
@@ -893,7 +932,7 @@ app.get('/api/events', async (req, res) => {
     broadcastClient(res, { type: 'connected' });
     const heartbeat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch {} }, 25000);
     req.on('close', () => { clearInterval(heartbeat); clients.delete(res); });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Event stream'); }
 });
 
 app.get('/api/projects', async (req, res) => {
@@ -901,24 +940,25 @@ app.get('/api/projects', async (req, res) => {
   try {
     const list = await dbListProjects(a.user.id);
     res.json(list.map(p => ({ ...p, files: p.fileCount })));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'List projects'); }
 });
+// Auth, rate limit and a job slot are checked before multer reads any of the upload.
 app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
   const len = Number(req.headers['content-length'] || 0);
-  if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.` });
+  if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.`, code: 'UPLOAD_TOO_LARGE' });
   next();
-}, upload.array('files', MAX_FILES), async (req, res) => {
-  const a = await authUser(req, res); if (!a) return;
+}, requireUser, uploadLimit, heavyJob, upload.array('files', MAX_FILES), runJob(async (req, res) => {
+  const a = req.auth;
   let workspace = null;
   try {
     const files = req.files || [];
-    if (!files.length) throw new Error('Choose at least one file.');
+    if (!files.length) throw new AppError('NO_FILES', 'Choose at least one file.');
     let total = 0;
     let skipped = 0;
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-upload-'));
     for (const file of files) {
       total += Number(file.size || 0);
-      if (total > MAX_TOTAL_UPLOAD) throw new Error(`Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`);
+      if (total > MAX_TOTAL_UPLOAD) throw new AppError('UPLOAD_TOO_LARGE', `Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`, { status: 413 });
       const rel = safeRelative(file.originalname);
       if (!rel) { skipped++; console.warn(`Skipped file with invalid path: "${file.originalname}" (size: ${file.size} bytes)`); continue; }
       const target = path.join(workspace, rel);
@@ -948,7 +988,7 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     console.log(`Upload complete: ${uploadedCount} total files (${storedCount} stored, ${uploadedCount - storedCount} excluded from .git/skip dirs) in workspace out of ${files.length} uploaded for project "${req.body.projectName || 'unnamed'}"`);
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
-    const name = normalizeName(req.body.projectName || first.split(/[\\/]/)[0]);
+    const name = normalizeName(parseOptionalString(req.body.projectName, 'Project name') || first.split(/[\\/]/)[0]);
     const storagePath = `projects/${a.user.id}/${id}/working.tgz`;
     const project = { id, userId: a.user.id, name, createdAt: nowIso(), updatedAt: nowIso(), syncState: 'local', syncMessage: 'Stored in persistent cloud storage.', fileCount: uploadedCount, storagePath };
     // A project is only created once its files are verifiably in Storage; a project without a
@@ -958,12 +998,12 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       try {
         persisted = await persistWorkingTree(project, workspace);
         if (persisted.manifest.fileCount === 0) {
-          throw new Error(`none of the ${uploadedCount} uploaded files can be stored because they are all inside .git or generated folders (${[...ARCHIVE_SKIP_NAMES].join(', ')})`);
+          throw new AppError('NOTHING_TO_STORE', `None of the ${uploadedCount} uploaded files can be stored because they are all inside .git or generated folders (${[...ARCHIVE_SKIP_NAMES].join(', ')}).`, { status: 422 });
         }
       } catch (e) {
-        console.error(`Add project: could not store ${uploadedCount} files: ${e.message}`);
         await storageRemove([storagePath, manifestPathFor(storagePath)]).catch(err => console.error(`Add project: cleanup failed: ${err.message}`));
-        throw new Error(`The project could not be saved to cloud storage, so it was not added: ${e.message}`);
+        if (e instanceof AppError) throw e;
+        throw new AppError('STORAGE_FAILED', 'The project could not be saved to cloud storage, so it was not added. Try again; if it keeps failing, the project may be over the storage size limit.', { status: 502, internal: `could not store ${uploadedCount} files: ${e.message}` });
       }
       project.storagePath = persisted.storagePath;
       try {
@@ -979,20 +1019,19 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     // If the database is missing the change tracking columns, give a clear message
     if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
       console.error('Add project failed: missing database columns. Run supabase/schema.sql to add them.');
-      res.status(500).json({ error: 'Database schema is outdated. Please contact the admin to run the updated supabase/schema.sql.' });
+      res.status(500).json({ error: 'Database schema is outdated. Please contact the admin to run the updated supabase/schema.sql.', code: 'SCHEMA_OUTDATED' });
     } else {
-      console.error('Add project failed:', e.message, e.stack?.split('\n').slice(0, 3).join('\n'));
-      res.status(500).json({ error: e.message });
+      sendError(res, e, 'Add project', 'The project could not be added.');
     }
   } finally {
     for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
     if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
   }
-});
+}));
 app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   try {
-    const project = await dbGetProject(req.params.id);
+    const project = await dbGetProject(parseProjectId(req.params.id));
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
     await withProjectLock(project.id, async () => {
       const snapshots = await queryOne('snapshots', supabase.from('snapshots').select('storage_path').eq('project_id', project.id));
@@ -1003,15 +1042,15 @@ app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
     });
     broadcast(a.user.id, { type: 'projects-changed' });
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Remove project'); }
 });
 app.get('/api/projects/:id/history', async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   try {
-    const project = await dbGetProject(req.params.id);
+    const project = await dbGetProject(parseProjectId(req.params.id));
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
     res.json(await listSnapshots(project.id, a.user.id));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Project history'); }
 });
 
 app.get('/api/github/repos', async (req, res) => {
@@ -1025,14 +1064,14 @@ app.get('/api/github/repos', async (req, res) => {
       if (data.length < 100) break;
     }
     res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'List GitHub repositories'); }
 });
-app.post('/api/github/fetch', ensureRequestProtection, async (req, res) => {
+app.post('/api/github/fetch', ensureRequestProtection, requireUser, fetchLimit, heavyJob, runJob(async (req, res) => {
   res.setTimeout(600000); // 10 minutes for large project fetch
-  const a = await authUser(req, res); if (!a) return;
-  const { projectId } = req.body || {};
-  if (!projectId) return res.status(400).json({ error: 'Select a project.' });
+  const a = req.auth;
+  let projectId;
   try {
+    projectId = parseProjectId(req.body?.projectId);
     const project = await dbGetProject(projectId);
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
     if (!project.repoFullName) return res.status(400).json({ error: 'Project is not connected to a GitHub repository. Push it first.' });
@@ -1042,25 +1081,48 @@ app.post('/api/github/fetch', ensureRequestProtection, async (req, res) => {
     console.log(`Fetch completed for project ${project.id}, sync state: ${updated?.syncState}, message: ${updated?.syncMessage}`);
     res.json({ ok: true, project: { ...updated, files: updated?.fileCount } });
   } catch (e) {
-    console.error(`Fetch failed for project ${projectId}:`, e.message, e.stderr || '');
-    const errorMsg = e.stderr || e.stdout || e.message || 'Fetch failed.';
-    res.status(500).json({ error: errorMsg });
+    sendError(res, e, `Fetch for project ${projectId}`, 'Fetch failed.');
   }
-});
-app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
-  res.setTimeout(600000); // 10 minutes for large project pushes
-  const a = await authUser(req, res); if (!a) return;
-  const { projectId, repoId, repoName, visibility = 'private', branch = 'main', conflictResolution } = req.body || {};
-  if (!projectId) return res.status(400).json({ error: 'Select a project.' });
+}));
+// Validates every push input up front; the returned values are the only ones used afterwards.
+async function parsePushRequest(body = {}) {
+  const input = {
+    projectId: parseProjectId(body.projectId),
+    repoId: parseRepoId(body.repoId),
+    repoName: parseOptionalString(body.repoName, 'Repository name', { max: 100 }),
+    visibility: parseEnum(body.visibility, 'Visibility', ['private', 'public'], 'private'),
+    branch: parseBranch(body.branch),
+    conflictResolution: parseEnum(body.conflictResolution, 'Conflict resolution', ['keep-local'], null)
+  };
   try {
-    await runGit(os.tmpdir(), ['check-ref-format', '--branch', String(branch)]);
+    await runGit(os.tmpdir(), ['check-ref-format', '--branch', input.branch]);
   } catch {
-    return res.status(400).json({ error: `"${branch}" is not a valid branch name.`, code: 'INVALID_BRANCH' });
+    throw new AppError('INVALID_BRANCH', `"${input.branch}" is not a valid branch name.`);
   }
+  return input;
+}
+const repoPath = fullName => String(fullName).split('/').map(encodeURIComponent).join('/');
+const SAFE_WARNING = {
+  beforeSnapshot: 'The before-push snapshot could not be saved.',
+  afterSnapshot: 'The after-push snapshot could not be saved.',
+  cloudCopy: 'The cloud copy of the project could not be updated; the next push will start from the previous copy.',
+  record: 'The project record could not be updated.'
+};
+
+app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, heavyJob, runJob(async (req, res) => {
+  res.setTimeout(600000); // 10 minutes for large project pushes
+  const a = req.auth;
+  let input;
+  try {
+    input = await parsePushRequest(req.body);
+  } catch (e) { return sendError(res, e, 'Push request'); }
+  const { projectId, repoId, repoName, visibility, branch, conflictResolution } = input;
   let project;
   try {
     project = await dbGetProject(projectId);
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
+    // Checked before any heavy work so a bad name is a quick 400.
+    if (!repoId) assertRepoName(normalizeName(repoName || project.name));
     const token = await userToken(a.user);
     if (!token) throw new PushError('GITHUB_NOT_CONNECTED', 'Connect GitHub before pushing.', { status: 401 });
     const github = (url, options = {}) => githubFetch(url, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } });
@@ -1081,22 +1143,23 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
             const name = normalizeName(repoName || project.name);
             const login = (await github('https://api.github.com/user')).login;
             try {
-              return { repo: await github(`https://api.github.com/repos/${login}/${name}`), created: false };
+              return { repo: await github(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`), created: false };
             } catch (e) {
               if (e.status !== 404) throw e;
             }
             const repo = await github('https://api.github.com/user/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, private: visibility !== 'public', auto_init: false }) });
             return { repo, created: true };
           },
-          deleteRepo: repo => github(`https://api.github.com/repos/${repo.full_name}`, { method: 'DELETE' }),
+          deleteRepo: repo => github(`https://api.github.com/repos/${repoPath(repo.full_name)}`, { method: 'DELETE' }),
           gitFor: (dir, fn) => withGitAuth(token, env => fn((args, opts) => runGit(dir, args, env, opts))),
           async remoteTreeCount(repo, sha) {
-            const tree = await github(`https://api.github.com/repos/${repo.full_name}/git/trees/${sha}?recursive=1`);
+            if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new AppError('VERIFY_FAILED', 'Push finished but the commit id could not be verified.', { status: 502 });
+            const tree = await github(`https://api.github.com/repos/${repoPath(repo.full_name)}/git/trees/${sha}?recursive=1`);
             return { count: (tree.tree || []).filter(entry => entry.type !== 'tree').length, truncated: Boolean(tree.truncated) };
           },
           async beforePush(dir) {
             const warnings = [];
-            await snapshotProject(project, dir, 'before-push').catch(e => warnings.push(`Before-push snapshot not saved: ${e.message}`));
+            await snapshotProject(project, dir, 'before-push').catch(e => { console.error(`Push ${project.id}: before-push snapshot: ${e.message}`); warnings.push(SAFE_WARNING.beforeSnapshot); });
             return warnings;
           },
           // The push already landed; anything that fails here is reported as a warning, never hidden.
@@ -1106,21 +1169,24 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
               ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch,
               lastPushedAt: nowIso(), lastPushedCommit: outcome.commit, syncState: 'synced', lastLocalChangeAt: nowIso()
             };
-            await snapshotProject(updated, dir, 'after-push').catch(e => warnings.push(`Snapshot not saved: ${e.message}`));
+            await snapshotProject(updated, dir, 'after-push').catch(e => { console.error(`Push ${project.id}: after-push snapshot: ${e.message}`); warnings.push(SAFE_WARNING.afterSnapshot); });
             try {
               const persisted = await persistWorkingTree(updated, dir);
               updated.storagePath = persisted.storagePath;
               updated.fileCount = persisted.manifest.fileCount;
             } catch (e) {
-              warnings.push(`Cloud copy not updated: ${e.message}`);
+              console.error(`Push ${project.id}: cloud copy: ${e.message}`);
+              warnings.push(SAFE_WARNING.cloudCopy);
             }
             const summary = outcome.outcome === 'no-changes' ? 'Already up to date: GitHub has the same files.' : `Pushed ${outcome.fileCount} files (commit ${outcome.commit.slice(0, 7)}).`;
-            updated.syncMessage = [summary, ...earlierWarnings, ...warnings].join(' ');
+            const specialNote = outcome.special.length ? `${outcome.special.length} symbolic link(s) or submodule(s) on GitHub are not copied into this project and were left unchanged.` : '';
+            updated.syncMessage = [summary, specialNote, ...earlierWarnings, ...warnings].filter(Boolean).join(' ');
             if (earlierWarnings.length || warnings.length) updated.syncState = 'warning';
             try {
               await dbUpsertProject(updated);
             } catch (e) {
-              warnings.push(`Project record not updated: ${e.message}`);
+              console.error(`Push ${project.id}: project record: ${e.message}`);
+              warnings.push(SAFE_WARNING.record);
             }
             Object.assign(project, updated);
             return warnings;
@@ -1128,7 +1194,6 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
         }
       });
     });
-    for (const w of result.warnings) console.warn(`Push ${project.id}: ${w}`);
     broadcast(a.user.id, { type: 'project-updated', projectId: project.id, reason: 'push' });
     res.json({
       ok: true,
@@ -1137,22 +1202,21 @@ app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
       created: result.created,
       restoredFromGitHub: result.restored.length,
       overwritten: result.overwritten,
+      skippedSpecial: result.special,
       warnings: result.warnings,
       repo: { full_name: result.repo.full_name, html_url: result.repo.html_url },
       project: { ...project, files: project.fileCount }
     });
   } catch (e) {
-    const known = e instanceof PushError;
-    const message = known ? e.message : (e.stderr || e.message || 'Push failed.').trim();
-    console.error(`Push failed for project ${projectId}${known ? ` [${e.code}]` : ''}: ${message}`, e.details || '');
-    const syncMessage = [message, e.details?.cleanup].filter(Boolean).join(' ');
+    const { status, body } = errorResponse(e, { context: `Push for project ${projectId}`, fallback: 'Push failed because of a server error.' });
+    if (e.details?.cleanup) body.error = `${body.error} ${e.details.cleanup}`;
     if (project) {
-      await updateProject(projectId, a.user.id, { syncState: e.code === 'CONFLICT' ? 'conflict' : 'error', syncMessage })
+      await updateProject(projectId, a.user.id, { syncState: e.code === 'CONFLICT' ? 'conflict' : 'error', syncMessage: body.error })
         .catch(err => console.error(`Push ${projectId}: could not record failure: ${err.message}`));
     }
-    res.status(known ? e.status : (e.status && e.status < 500 ? e.status : 500)).json({ error: syncMessage, code: known ? e.code : 'PUSH_FAILED', details: e.details });
+    res.status(status).json(body);
   }
-});
+}));
 
 async function syncProjectForUser(user, project) {
   if (!project.repoFullName) return;
@@ -1171,7 +1235,7 @@ async function syncProjectForUser(user, project) {
         // Pull only when the stored copy is unchanged since the last push/pull; never merge over local edits.
         const plan = await withGitAuth(token, env => planPull({ git: (args, opts) => runGit(dir, args, env, opts), dir, branch, knownCommit: lastKnownCommit(project) }));
         if (plan.action === 'none') {
-          if (plan.reason === 'remote-branch-missing') throw new Error(`Branch ${branch} no longer exists on GitHub.`);
+          if (plan.reason === 'remote-branch-missing') throw new AppError('BRANCH_MISSING', `Branch ${branch} no longer exists on GitHub.`);
           return;
         }
         if (plan.action === 'conflict') {
@@ -1183,12 +1247,14 @@ async function syncProjectForUser(user, project) {
         await snapshotProject(project, dir, 'after-pull').catch(e => console.warn(`Sync snapshot skipped: ${e.message}`));
         // The pull is only real once the cloud copy holds it; a failed upload is an error, not a footnote.
         const persisted = await persistWorkingTree(project, dir);
-        await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: persisted.manifest.fileCount, syncState: 'synced', syncMessage: 'Remote changes pulled automatically.', lastSyncAt: nowIso(), lastPulledCommit: plan.remote, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
+        const specialNote = plan.special.length ? ` ${plan.special.length} symbolic link(s) or submodule(s) on GitHub were not copied into the project.` : '';
+        await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: persisted.manifest.fileCount, syncState: 'synced', syncMessage: `Remote changes pulled automatically.${specialNote}`, lastSyncAt: nowIso(), lastPulledCommit: plan.remote, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
         broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
       });
     } catch (e) {
-      const message = e instanceof PushError ? e.message.replace(' Nothing was sent to GitHub.', '') : (e.stderr || e.message);
-      console.error(`Sync failed for project ${project.id}:`, message);
+      // A stable, client-safe message (no per-error ref) so a repeating failure is reported once.
+      const message = e instanceof AppError ? e.message.replace(' Nothing was sent to GitHub.', '') : 'Automatic sync failed because of a server error.';
+      console.error(`Sync failed for project ${project.id}:`, e instanceof AppError ? `[${e.code}] ${e.internal || e.message}` : (e?.stack || e), e?.stderr || '');
       if (project.syncState === 'error' && project.syncMessage === message) return; // already reported
       await updateProject(project.id, user.id, { syncState: 'error', syncMessage: message, lastCheckedAt: nowIso() })
         .catch(err => console.error(`Sync ${project.id}: could not record failure: ${err.message}`));
@@ -1238,8 +1304,9 @@ app.get('/api/health', async (_req, res) => {
 });
 
 app.use((err, _req, res, next) => {
-  if (err instanceof multer.MulterError) return res.status(413).json({ error: `Upload rejected: ${err.message}` });
-  if (err) return res.status(500).json({ error: 'Unexpected server error.' });
+  if (err instanceof multer.MulterError) return res.status(413).json({ error: `Upload rejected: ${err.message}`, code: 'UPLOAD_REJECTED' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'The request body is not valid JSON.', code: 'INVALID_JSON' });
+  if (err) return sendError(res, err, 'Unhandled request error');
   next();
 });
 

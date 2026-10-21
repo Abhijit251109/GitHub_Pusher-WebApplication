@@ -256,3 +256,113 @@ test('direct commitAndPush refuses to commit an empty tree', async () => {
   await assert.rejects(commitAndPush({ git: gitIn(dir), dir, branch: 'main', message: 'x' }), { code: 'WORKSPACE_EMPTY' });
   assert.deepEqual(await remoteFiles(remote), []);
 });
+
+// ---------- symlinks / submodules on the remote (never written into the workspace) ----------
+
+// Commits a symlink and a submodule entry to the remote, as someone could on GitHub.
+async function commitSpecialToRemote(remote) {
+  const clone = await tmp('special');
+  await execFileAsync('git', ['clone', '-q', remote, clone], { env: GIT_ENV });
+  const git = gitIn(clone);
+  await git(['config', 'user.name', 'Other']);
+  await git(['config', 'user.email', 'other@localhost']);
+  await git(['checkout', '-q', '-B', 'main']);
+  await fs.symlink('/etc/passwd', path.join(clone, 'escape-link'));
+  await git(['add', 'escape-link']);
+  await git(['update-index', '--add', '--cacheinfo', `160000,${'a'.repeat(40)},vendor/sub`]);
+  await git(['commit', '-q', '-m', 'add symlink and submodule']);
+  await git(['push', '-q', 'origin', 'main']);
+  return (await git(['rev-parse', 'HEAD'])).stdout.trim();
+}
+async function symlinksIn(root) {
+  const found = [];
+  async function walk(dir) {
+    for (const e of await fs.readdir(dir, { withFileTypes: true })) {
+      if (e.name === '.git') continue;
+      const p = path.join(dir, e.name);
+      if (e.isSymbolicLink()) found.push(path.relative(root, p));
+      else if (e.isDirectory()) await walk(p);
+    }
+  }
+  await walk(root);
+  return found;
+}
+async function remoteEntry(remote, rel) {
+  return (await gitIn(remote)(['ls-tree', 'main', '--', rel])).stdout.trim().split(/\s+/).slice(0, 3).join(' ');
+}
+// Same check createArchive performs before persisting: tar must not meet a symlink.
+async function archiveLikeServer(dir) {
+  const tar = await import('tar');
+  const file = path.join(await tmp('tar'), 'w.tgz');
+  await tar.c({ gzip: true, file, cwd: dir, portable: true, filter: (p, stat) => {
+    if (stat.isSymbolicLink()) throw new Error(`symlink in archive: ${p}`);
+    return !p.startsWith('./.git');
+  } }, ['.']);
+}
+
+test('symlinks and submodules on GitHub are kept there but never written into the workspace (push)', async () => {
+  const remote = await bareRepo();
+  const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1' } }));
+  await commitSpecialToRemote(remote);
+  const linkBefore = await remoteEntry(remote, 'escape-link');
+  const subBefore = await remoteEntry(remote, 'vendor/sub');
+  let workDir;
+  const project = { id: 'p', lastPushedCommit: first.commit, lastPushedAt: new Date().toISOString() };
+  const { deps } = pushDeps({ remote, files: { 'a.txt': 'a2' }, overrides: {
+    afterPush: async dir => { workDir = dir; assert.deepEqual(await symlinksIn(dir), []); await archiveLikeServer(dir); return []; }
+  } });
+  const result = await push(project, { deps });
+  assert.equal(result.outcome, 'pushed');
+  assert.deepEqual(result.special.sort(), ['escape-link', 'vendor/sub']);
+  assert.ok(workDir);
+  assert.equal(await remoteEntry(remote, 'escape-link'), linkBefore, 'symlink unchanged on GitHub');
+  assert.equal(await remoteEntry(remote, 'vendor/sub'), subBefore, 'submodule unchanged on GitHub');
+  assert.equal(await remoteFile(remote, 'a.txt'), 'a2');
+});
+
+test('auto-pull with a new remote symlink pulls the rest, writes no symlink, and does not wedge', async () => {
+  const remote = await bareRepo();
+  const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1' } }));
+  await commitToRemote(remote, { 'b.txt': 'b-remote' });
+  const tip = await commitSpecialToRemote(remote);
+
+  const pulled = await pullInto(remote, { 'a.txt': 'a1' }, first.commit);
+  assert.equal(pulled.plan.action, 'pulled');
+  assert.equal(pulled.plan.remote, tip);
+  assert.deepEqual(pulled.plan.special.sort(), ['escape-link', 'vendor/sub']);
+  assert.equal(await fs.readFile(path.join(pulled.dir, 'b.txt'), 'utf8'), 'b-remote');
+  assert.deepEqual(await symlinksIn(pulled.dir), []);
+  await archiveLikeServer(pulled.dir); // persistWorkingTree's archive step succeeds
+
+  // Next cycle, from the stored copy: up to date, not an error or a conflict.
+  const next = await pullInto(remote, { 'a.txt': 'a1', 'b.txt': 'b-remote' }, tip);
+  assert.equal(next.plan.action, 'none');
+  // And a later push from that copy works and keeps the special entries.
+  const project = { id: 'p', lastPulledCommit: tip, lastSyncAt: new Date().toISOString() };
+  const again = await push(project, pushDeps({ remote, files: { 'a.txt': 'a1', 'b.txt': 'b2' } }));
+  assert.equal(again.outcome, 'pushed');
+  assert.deepEqual((await remoteFiles(remote)).sort(), ['a.txt', 'b.txt', 'escape-link', 'vendor/sub']);
+});
+
+// ---------- git stderr stays out of user-facing messages ----------
+
+test('a rejected push reports a safe message; git stderr is kept for the log only', async () => {
+  const remote = await bareRepo();
+  const hook = path.join(remote, 'hooks', 'pre-receive');
+  await fs.writeFile(hook, '#!/bin/sh\necho "remote: internal url https://x-access-token:ghs_SECRET@github.com/me/r.git" >&2\nexit 1\n');
+  await fs.chmod(hook, 0o755);
+  const error = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a' } })).catch(e => e);
+  assert.equal(error.code, 'PUSH_FAILED');
+  assert.equal(error.message, 'GitHub rejected the push.');
+  assert.doesNotMatch(JSON.stringify({ message: error.message, details: error.details }), /ghs_SECRET|x-access-token/);
+  assert.match(error.internal, /ghs_SECRET/);
+});
+
+test('a protected-branch rejection gets a specific safe message', async () => {
+  const remote = await bareRepo();
+  const hook = path.join(remote, 'hooks', 'pre-receive');
+  await fs.writeFile(hook, '#!/bin/sh\necho "remote: error: GH006: Protected branch update failed for refs/heads/main." >&2\nexit 1\n');
+  await fs.chmod(hook, 0o755);
+  const error = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a' } })).catch(e => e);
+  assert.equal(error.message, 'The branch is protected on GitHub, so it cannot be pushed to directly.');
+});
