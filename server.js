@@ -4,15 +4,16 @@ import fs from 'fs/promises';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { execFile } from 'child_process';
-import { promisify } from 'util';
 import { createClient } from '@supabase/supabase-js';
 import * as tar from 'tar';
 import helmet from 'helmet';
+import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, performPush, planPull, lastKnownCommit } from './lib/push-core.js';
+import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
+import { createGitRunner } from './lib/git.js';
 
-const execFileAsync = promisify(execFile);
 const app = express();
-const PORT = Number(process.env.PORT || 4173);
+const env = (name, fallback, range) => envInt(process.env, name, fallback, range);
+const PORT = env('PORT', 4173, { max: 65535 });
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = process.cwd();
 const APPLICATIONS = path.join(ROOT, 'application');
@@ -24,19 +25,27 @@ const APPLICATION_PLATFORMS = {
 };
 const LOCAL_DATA = path.join(ROOT, 'data');
 const UPLOAD_TEMP = path.join(LOCAL_DATA, 'uploads');
-const MAX_FILES = Number(process.env.MAX_UPLOAD_FILES || 20000);
-const MAX_FILE_SIZE = Number(process.env.MAX_FILE_SIZE_MB || 100) * 1024 * 1024;
-const MAX_TOTAL_UPLOAD = Number(process.env.MAX_TOTAL_UPLOAD_MB || 500) * 1024 * 1024;
-const MAX_ARCHIVE_SIZE = Number(process.env.MAX_ARCHIVE_MB || 500) * 1024 * 1024;
-const MAX_EXTRACTED_BYTES = Number(process.env.MAX_EXTRACTED_MB || 1500) * 1024 * 1024;
-const MAX_ARCHIVE_ENTRIES = Number(process.env.MAX_ARCHIVE_ENTRIES || 50000);
-const MAX_DECOMPRESSION_RATIO = Number(process.env.MAX_DECOMPRESSION_RATIO || 200);
-const MAX_SNAPSHOTS = Number(process.env.MAX_SNAPSHOTS_PER_PROJECT || 10);
-const SESSION_TTL_MS = Number(process.env.SESSION_TTL_DAYS || 7) * 24 * 60 * 60 * 1000;
+const MAX_FILES = env('MAX_UPLOAD_FILES', 20000);
+const MAX_FILE_SIZE = env('MAX_FILE_SIZE_MB', 100) * 1024 * 1024;
+const MAX_TOTAL_UPLOAD = env('MAX_TOTAL_UPLOAD_MB', 500) * 1024 * 1024;
+// Matches the gpp-private bucket's file_size_limit in supabase/schema.sql (200 MB).
+const MAX_ARCHIVE_SIZE = env('MAX_ARCHIVE_MB', 200) * 1024 * 1024;
+const MAX_EXTRACTED_BYTES = env('MAX_EXTRACTED_MB', 1500) * 1024 * 1024;
+const MAX_ARCHIVE_ENTRIES = env('MAX_ARCHIVE_ENTRIES', 50000);
+const MAX_DECOMPRESSION_RATIO = env('MAX_DECOMPRESSION_RATIO', 200);
+const MAX_SNAPSHOTS = env('MAX_SNAPSHOTS_PER_PROJECT', 10);
+const SESSION_TTL_MS = env('SESSION_TTL_DAYS', 7) * 24 * 60 * 60 * 1000;
 const LOGIN_CODE_TTL_MS = 2 * 60 * 1000;
 const OAUTH_ATTEMPT_TTL_MS = 10 * 60 * 1000;
 const SSE_TICKET_TTL_MS = 5 * 60 * 1000;
-const SYNC_MS = Number(process.env.SYNC_INTERVAL_MS || 30000);
+const SYNC_MS = env('SYNC_INTERVAL_MS', 30000, { min: 1000 });
+// Each git call is killed after GIT_TIMEOUT_MS; a whole push/fetch/upload/sync job stops issuing
+// git calls after JOB_TIMEOUT_MS. GitHub API calls time out after 30 s. Supabase calls (including
+// archive uploads of up to MAX_ARCHIVE_MB) time out after SUPABASE_TIMEOUT_MS.
+const GIT_TIMEOUT_MS = env('GIT_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
+const JOB_TIMEOUT_MS = env('JOB_TIMEOUT_MS', 10 * 60 * 1000, { min: 1000 });
+const GITHUB_TIMEOUT_MS = 30 * 1000;
+const SUPABASE_TIMEOUT_MS = env('SUPABASE_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
 const APP_NAME = process.env.APP_NAME || 'GitHub Project Pusher';
 const SESSION_COOKIE = 'gpp_session';
 const OAUTH_BINDING_COOKIE = 'gpp_oauth_pre';
@@ -51,7 +60,13 @@ const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_I
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
 const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
-if (process.env.TRUST_PROXY) app.set('trust proxy', Number(process.env.TRUST_PROXY));
+const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
+if (TRUST_PROXY !== undefined) app.set('trust proxy', TRUST_PROXY);
+// Only these origins get credentialed CORS and pass ensureRequestProtection.
+const ORIGIN_POLICY = createOriginPolicy({ isProd, frontendUrl: FRONTEND_URL, publicBaseUrl: process.env.PUBLIC_BASE_URL });
+if (isProd && !FRONTEND_URL) console.warn('FRONTEND_URL is not set: a separately hosted frontend (e.g. GitHub Pages) will be refused. Set FRONTEND_URL to its URL.');
+const MAX_CONCURRENT_JOBS = env('MAX_CONCURRENT_JOBS', 2);
+const JOB_GATE = createJobGate({ maxConcurrent: MAX_CONCURRENT_JOBS, maxPerUser: 1 });
 
 const SUPABASE_SERVER_KEY = process.env.SUPABASE_SECRET_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY;
 const hasSupabase = Boolean(process.env.SUPABASE_URL && SUPABASE_SERVER_KEY);
@@ -59,8 +74,13 @@ if (isProd && !hasSupabase) {
   throw new Error('Persistent storage is required in production. Set SUPABASE_URL and SUPABASE_SECRET_KEY.');
 }
 
+// Every Supabase request (database and Storage) is abandoned after SUPABASE_TIMEOUT_MS.
+const supabaseFetch = (url, options = {}) => fetch(url, {
+  ...options,
+  signal: options.signal ? AbortSignal.any([options.signal, AbortSignal.timeout(SUPABASE_TIMEOUT_MS)]) : AbortSignal.timeout(SUPABASE_TIMEOUT_MS)
+});
 const supabase = hasSupabase
-  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, { auth: { autoRefreshToken: false, persistSession: false } })
+  ? createClient(process.env.SUPABASE_URL, SUPABASE_SERVER_KEY, { auth: { autoRefreshToken: false, persistSession: false }, global: { fetch: supabaseFetch } })
   : null;
 
 await fs.mkdir(UPLOAD_TEMP, { recursive: true });
@@ -98,8 +118,6 @@ app.use(helmet({
       connectSrc: [
         "'self'",
         ...(FRONTEND_ORIGIN ? [FRONTEND_ORIGIN] : []),
-        // Allow GitHub Pages origins in production
-        ...(isProd ? ['https://*.github.io'] : []),
         // Allow local development origins
         ...(!isProd ? ['http://localhost:*', 'http://127.0.0.1:*'] : [])
       ],
@@ -168,22 +186,7 @@ function decrypt(value) {
 function publicBaseUrl(req) {
   return String(process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get('host')}`).replace(/\/$/, '');
 }
-function allowedOrigin(origin) {
-  try {
-    const normalized = new URL(origin).origin;
-    if (FRONTEND_ORIGIN && normalized === FRONTEND_ORIGIN) return true;
-    if (process.env.PUBLIC_BASE_URL && normalized === new URL(process.env.PUBLIC_BASE_URL).origin) return true;
-    // Allow GitHub Pages origins in production when FRONTEND_URL is not explicitly set
-    if (isProd && normalized.endsWith('.github.io')) return true;
-    // In development, allow localhost origins
-    if (!isProd) {
-      const localhostPorts = ['3000', '5173', '5174', '8080', '4173'];
-      if (normalized.startsWith('http://localhost:') && localhostPorts.includes(new URL(normalized).port)) return true;
-      if (normalized === 'http://localhost' || normalized === 'http://127.0.0.1:4173') return true;
-    }
-  } catch {}
-  return false;
-}
+function allowedOrigin(origin) { return ORIGIN_POLICY.allowed(origin); }
 function allowedReturnTo(value, req) {
   if (!value) return null;
   try {
@@ -231,9 +234,11 @@ function getBearerToken(req) {
 }
 function requestHasBearer(req) { return Boolean(getBearerToken(req)); }
 
-async function queryOne(table, builder) {
+// `build` receives the client only after the configuration check, so a missing Supabase setup is
+// reported as such instead of as "Cannot read properties of null (reading 'from')".
+async function queryOne(table, build) {
   supabaseRequired();
-  const { data, error } = await builder;
+  const { data, error } = await build(supabase);
   if (error) throw new Error(`${table}: ${error.message}`);
   return data;
 }
@@ -248,6 +253,7 @@ function userFromRow(row) {
   };
 }
 function projectFromRow(row) {
+  if (!row) return null;
   return {
     id: row.id, userId: row.user_id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at,
     syncState: row.sync_state, syncMessage: row.sync_message, repoId: row.repo_id, repoFullName: row.repo_full_name,
@@ -277,32 +283,32 @@ async function dbUserUpsert(user) {
     github_refresh_expires_at: user.githubRefreshExpiresAt ? new Date(user.githubRefreshExpiresAt).toISOString() : null,
     updated_at: nowIso()
   };
-  await queryOne('users', supabase.from('users').upsert(row, { onConflict: 'id' }));
+  await queryOne('users', db => db.from('users').upsert(row, { onConflict: 'id' }));
   return user;
 }
 async function dbGetUser(userId) {
-  const data = await queryOne('users', supabase.from('users').select('*').eq('id', String(userId)).maybeSingle());
+  const data = await queryOne('users', db => db.from('users').select('*').eq('id', String(userId)).maybeSingle());
   return userFromRow(data);
 }
 async function dbGetProject(projectId) {
-  const data = await queryOne('projects', supabase.from('projects').select('*').eq('id', projectId).maybeSingle());
+  const data = await queryOne('projects', db => db.from('projects').select('*').eq('id', projectId).maybeSingle());
   return projectFromRow(data);
 }
 async function dbListProjects(userId) {
-  const data = await queryOne('projects', supabase.from('projects').select('*').eq('user_id', String(userId)).order('name', { ascending: true }));
+  const data = await queryOne('projects', db => db.from('projects').select('*').eq('user_id', String(userId)).order('name', { ascending: true }));
   return (data || []).map(projectFromRow);
 }
 async function dbUpsertProject(project) {
   const row = projectToRow(project);
   try {
-    await queryOne('projects', supabase.from('projects').upsert(row, { onConflict: 'id' }));
+    await queryOne('projects', db => db.from('projects').upsert(row, { onConflict: 'id' }));
   } catch (e) {
     // If the database is missing the change tracking columns, drop them and retry
     if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
       const fallback = { ...row };
       delete fallback.last_local_change_at;
       delete fallback.last_github_change_at;
-      await queryOne('projects', supabase.from('projects').upsert(fallback, { onConflict: 'id' }));
+      await queryOne('projects', db => db.from('projects').upsert(fallback, { onConflict: 'id' }));
       console.warn('Database missing change tracking columns. Run supabase/schema.sql to add them.');
     } else {
       throw e;
@@ -311,24 +317,24 @@ async function dbUpsertProject(project) {
   return project;
 }
 async function dbDeleteProject(projectId, userId) {
-  await queryOne('projects', supabase.from('projects').delete().eq('id', projectId).eq('user_id', String(userId)));
+  await queryOne('projects', db => db.from('projects').delete().eq('id', projectId).eq('user_id', String(userId)));
 }
 async function dbListUsers() {
-  const data = await queryOne('users', supabase.from('users').select('*'));
+  const data = await queryOne('users', db => db.from('users').select('*'));
   return (data || []).map(userFromRow);
 }
 
 async function createSession(userId) {
   const token = randomToken(32);
-  await queryOne('sessions', supabase.from('sessions').insert({ id: hashSecret(token), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString() }));
+  await queryOne('sessions', db => db.from('sessions').insert({ id: hashSecret(token), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + SESSION_TTL_MS).toISOString() }));
   return token;
 }
 async function sessionFromToken(token) {
   if (!token) return null;
-  const data = await queryOne('sessions', supabase.from('sessions').select('*').eq('id', hashSecret(token)).maybeSingle());
+  const data = await queryOne('sessions', db => db.from('sessions').select('*').eq('id', hashSecret(token)).maybeSingle());
   if (!data) return null;
   if (new Date(data.expires_at).getTime() < Date.now()) {
-    await queryOne('sessions', supabase.from('sessions').delete().eq('id', data.id));
+    await queryOne('sessions', db => db.from('sessions').delete().eq('id', data.id));
     return null;
   }
   const user = await dbGetUser(data.user_id);
@@ -337,7 +343,7 @@ async function sessionFromToken(token) {
 }
 async function deleteSession(token) {
   if (!token) return;
-  await queryOne('sessions', supabase.from('sessions').delete().eq('id', hashSecret(token)));
+  await queryOne('sessions', db => db.from('sessions').delete().eq('id', hashSecret(token)));
 }
 async function getSession(req, res, { createAnonymous = false } = {}) {
   const bearer = getBearerToken(req);
@@ -349,30 +355,30 @@ async function getSession(req, res, { createAnonymous = false } = {}) {
   }
   if (!createAnonymous) return null;
   const token = randomToken(32);
-  await queryOne('sessions', supabase.from('sessions').insert({ id: hashSecret(token), user_id: null, created_at: nowIso(), expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString() }));
+  await queryOne('sessions', db => db.from('sessions').insert({ id: hashSecret(token), user_id: null, created_at: nowIso(), expires_at: new Date(Date.now() + 15 * 60 * 1000).toISOString() }));
   res.setHeader('Set-Cookie', `${SESSION_COOKIE}=${token}; ${cookieOptions()}`);
   return { sid: hashSecret(token), token, user: null };
 }
 async function authUser(req, res, required = true) {
   const session = await getSession(req, res);
   if (!session?.user) {
-    if (required) res.status(401).json({ error: 'Please sign in with GitHub.' });
+    if (required) res.status(401).json({ error: 'Please sign in with GitHub.', code: 'NOT_SIGNED_IN' });
     return null;
   }
   return { ...session, user: session.user };
 }
 
 async function createOAuthAttempt(state, codeVerifier, returnTo, browserBinding) {
-  await queryOne('oauth_attempts', supabase.from('oauth_attempts').insert({
+  await queryOne('oauth_attempts', db => db.from('oauth_attempts').insert({
     state_hash: hashSecret(state), code_verifier: codeVerifier, return_to: returnTo,
     client_cookie_hash: hashSecret(browserBinding),
     created_at: nowIso(), expires_at: new Date(Date.now() + OAUTH_ATTEMPT_TTL_MS).toISOString()
   }));
 }
 async function consumeOAuthAttempt(state, browserBinding) {
-  const row = await queryOne('oauth_attempts', supabase.from('oauth_attempts').select('*').eq('state_hash', hashSecret(state)).maybeSingle());
+  const row = await queryOne('oauth_attempts', db => db.from('oauth_attempts').select('*').eq('state_hash', hashSecret(state)).maybeSingle());
   if (!row) return null;
-  await queryOne('oauth_attempts', supabase.from('oauth_attempts').delete().eq('state_hash', hashSecret(state)));
+  await queryOne('oauth_attempts', db => db.from('oauth_attempts').delete().eq('state_hash', hashSecret(state)));
   if (new Date(row.expires_at).getTime() < Date.now()) return null;
   // Native clients return through a registered URI rather than the system browser's cookie jar.
   // State + PKCE remain mandatory; the browser-binding cookie remains required for web attempts.
@@ -382,26 +388,26 @@ async function consumeOAuthAttempt(state, browserBinding) {
 }
 async function createLoginCode(userId) {
   const code = randomToken(32);
-  await queryOne('login_codes', supabase.from('login_codes').insert({ code_hash: hashSecret(code), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + LOGIN_CODE_TTL_MS).toISOString() }));
+  await queryOne('login_codes', db => db.from('login_codes').insert({ code_hash: hashSecret(code), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + LOGIN_CODE_TTL_MS).toISOString() }));
   return code;
 }
 async function consumeLoginCode(code) {
-  const row = await queryOne('login_codes', supabase.from('login_codes').select('*').eq('code_hash', hashSecret(code)).maybeSingle());
+  const row = await queryOne('login_codes', db => db.from('login_codes').select('*').eq('code_hash', hashSecret(code)).maybeSingle());
   if (!row) return null;
-  await queryOne('login_codes', supabase.from('login_codes').delete().eq('code_hash', hashSecret(code)));
+  await queryOne('login_codes', db => db.from('login_codes').delete().eq('code_hash', hashSecret(code)));
   if (new Date(row.expires_at).getTime() < Date.now()) return null;
   return row;
 }
 async function createSseTicket(userId) {
   const ticket = randomToken(24);
-  await queryOne('sse_tickets', supabase.from('sse_tickets').insert({ ticket_hash: hashSecret(ticket), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + SSE_TICKET_TTL_MS).toISOString() }));
+  await queryOne('sse_tickets', db => db.from('sse_tickets').insert({ ticket_hash: hashSecret(ticket), user_id: String(userId), created_at: nowIso(), expires_at: new Date(Date.now() + SSE_TICKET_TTL_MS).toISOString() }));
   return ticket;
 }
 async function consumeSseTicket(ticket) {
   if (!ticket) return null;
-  const row = await queryOne('sse_tickets', supabase.from('sse_tickets').select('*').eq('ticket_hash', hashSecret(ticket)).maybeSingle());
+  const row = await queryOne('sse_tickets', db => db.from('sse_tickets').select('*').eq('ticket_hash', hashSecret(ticket)).maybeSingle());
   if (!row) return null;
-  await queryOne('sse_tickets', supabase.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
+  await queryOne('sse_tickets', db => db.from('sse_tickets').delete().eq('ticket_hash', row.ticket_hash));
   if (new Date(row.expires_at).getTime() < Date.now()) return null;
   const user = await dbGetUser(row.user_id);
   return user ? { user } : null;
@@ -409,10 +415,10 @@ async function consumeSseTicket(ticket) {
 async function cleanupAuthRecords() {
   const cutoff = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
   await Promise.all([
-    queryOne('oauth_attempts', supabase.from('oauth_attempts').delete().lt('expires_at', new Date().toISOString())),
-    queryOne('login_codes', supabase.from('login_codes').delete().lt('expires_at', new Date().toISOString())),
-    queryOne('sse_tickets', supabase.from('sse_tickets').delete().lt('expires_at', new Date().toISOString())),
-    queryOne('sessions', supabase.from('sessions').delete().lt('expires_at', new Date().toISOString()))
+    queryOne('oauth_attempts', db => db.from('oauth_attempts').delete().lt('expires_at', new Date().toISOString())),
+    queryOne('login_codes', db => db.from('login_codes').delete().lt('expires_at', new Date().toISOString())),
+    queryOne('sse_tickets', db => db.from('sse_tickets').delete().lt('expires_at', new Date().toISOString())),
+    queryOne('sessions', db => db.from('sessions').delete().lt('expires_at', new Date().toISOString()))
   ]).catch(() => {});
 }
 
@@ -432,18 +438,66 @@ async function storageUpload(objectPath, data, contentType = 'application/octet-
 async function storageDownload(objectPath) {
   supabaseRequired();
   const { data, error } = await supabase.storage.from(STORAGE_BUCKET).download(objectPath);
-  if (error || !data) throw new Error(`Storage download failed: ${error?.message || 'not found'}`);
+  if (error || !data) {
+    // Downloads report HTTP failures as a raw Response (message "{}"), so read status and body here.
+    const response = error?.originalError;
+    const status = typeof response?.status === 'number' ? response.status : null;
+    const body = status ? await response.text().catch(() => '') : '';
+    const failure = new Error(`Storage download failed for ${objectPath}: ${status ? `HTTP ${status} ${body}` : (error?.message || 'no data')}`.trim());
+    failure.notFound = !error || status === 404 || /not.?found/i.test(body);
+    throw failure;
+  }
   return Buffer.from(await data.arrayBuffer());
+}
+async function storageList(prefix) {
+  supabaseRequired();
+  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list(prefix, { limit: 1000 });
+  if (error) throw new Error(`Storage list failed for ${prefix}: ${error.message}`);
+  return (data || []).filter(entry => entry.id).map(entry => `${prefix}/${entry.name}`);
+}
+// Removes everything stored for a project: the known paths plus anything else under its
+// projects/ and snapshots/ folders. Returns the paths that could not be removed (already logged).
+async function removeProjectObjects(project, known) {
+  const prefixes = [`projects/${project.userId}/${project.id}`, `snapshots/${project.userId}/${project.id}`];
+  const paths = new Set(known);
+  for (const prefix of prefixes) {
+    try { for (const p of await storageList(prefix)) paths.add(p); } catch (e) { console.error(`Remove project ${project.id}: ${e.message}`); }
+  }
+  try {
+    await storageRemove([...paths]);
+    return [];
+  } catch (e) {
+    console.error(`Remove project ${project.id}: orphaned storage objects ${[...paths].join(', ')}: ${e.message}`);
+    return [...paths];
+  }
 }
 async function storageRemove(paths) {
   if (!paths.length) return;
+  supabaseRequired();
   const { error } = await supabase.storage.from(STORAGE_BUCKET).remove(paths);
   if (error) throw new Error(`Storage delete failed: ${error.message}`);
 }
 
-// Patterns to skip when creating archives (large generated files that bloat storage)
-// Used in createArchive (full paths) and countFiles (directory names only)
-const ARCHIVE_SKIP_NAMES = new Set(['node_modules', '.venv', '__pycache__', '.gradle', '.m2', 'target', 'build', 'dist', '.next', '.cache']);
+// Confirms an uploaded object is really in Storage with the expected size.
+async function storageVerify(objectPath, expectedBytes) {
+  supabaseRequired();
+  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).info(objectPath);
+  if (error || !data) throw new Error(`Storage verification failed for ${objectPath}: ${error?.message || 'object not found'}`);
+  const size = Number(data.size ?? data.metadata?.size);
+  if (Number.isFinite(size) && size !== expectedBytes) throw new Error(`Storage verification failed for ${objectPath}: stored ${size} bytes, expected ${expectedBytes}.`);
+}
+function manifestPathFor(storagePath) { return path.posix.join(path.posix.dirname(storagePath), 'manifest.json'); }
+async function loadManifest(storagePath) {
+  let buf;
+  try { buf = await storageDownload(manifestPathFor(storagePath)); } catch (e) {
+    if (e.notFound) return null; // stored before manifests existed
+    throw e;
+  }
+  return JSON.parse(buf.toString('utf8'));
+}
+
+// Patterns to skip when creating archives (large generated files that bloat storage) live in
+// lib/push-core.js: createArchive matches them as top-level entries, countFiles as any directory name.
 async function createArchive(sourceDir, destination, includeGit = true) {
   // Use '.' as the entry so tar walks the tree — skip patterns are handled in the filter
   const entries = ['.'];
@@ -512,50 +566,49 @@ async function extractArchive(buffer, destination) {
     await fs.rm(archive, { force: true });
   }
 }
+// Restores the stored project and checks it against its manifest. Any failure aborts the caller:
+// an empty or partial workspace must never reach git.
 async function withWorkspace(project, fn) {
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-project-'));
   try {
     if (project?.storagePath) {
       try {
+        const manifest = await loadManifest(project.storagePath);
         const archive = await storageDownload(project.storagePath);
         await extractArchive(archive, work);
-        const restored = await countFiles(work, { includeGit: false, includeSkipped: false });
-        console.log(`withWorkspace: restored ${restored} files from archive for project ${project?.id}`);
+        const { fileCount, legacy } = await verifyRestoredWorkspace(work, manifest);
+        console.log(`withWorkspace: restored ${fileCount} files${legacy ? ' (no manifest, legacy project)' : ' (matches manifest)'} for project ${project.id}`);
       } catch (e) {
-        console.warn(`withWorkspace: could not restore archive for project ${project?.id}: ${e.message}`);
-        // Continue with empty workspace — git operations will still work
+        if (e instanceof PushError) throw e;
+        throw new PushError('RESTORE_FAILED', 'The stored copy of this project could not be restored from cloud storage. Nothing was sent to GitHub.', { status: 502, internal: e.message });
       }
+    } else if (Number(project?.fileCount || 0) > 0) {
+      throw new PushError('RESTORE_FAILED', 'This project has no stored copy in cloud storage (it was never saved successfully). Remove the project and add it again. Nothing was sent to GitHub.', { status: 422 });
     }
     return await fn(work);
   } finally {
     await fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }
 }
+// Uploads the working tree plus a manifest of its files, and confirms both landed in Storage.
 async function persistWorkingTree(project, work) {
   const archive = path.join(os.tmpdir(), `gpp-working-${crypto.randomUUID()}.tgz`);
   try {
     // Exclude .git from the archive — it will be recreated by ensureGit on next workspace load
     const archiveSize = await createArchive(work, archive, false);
-    const fileCount = await countFiles(work, { includeGit: false, includeSkipped: false });
-    console.log(`persistWorkingTree: archiving ${fileCount} files (${Math.round(archiveSize / 1024)} KB) for project ${project.id}`);
+    const manifest = await buildManifest(work);
+    console.log(`persistWorkingTree: archiving ${manifest.fileCount} files (${Math.round(archiveSize / 1024)} KB) for project ${project.id}`);
     const buf = await fs.readFile(archive);
     const objectPath = project.storagePath || `projects/${project.userId}/${project.id}/working.tgz`;
+    const manifestBuf = Buffer.from(JSON.stringify(manifest));
     await storageUpload(objectPath, buf, 'application/gzip');
-    const stat = await fs.stat(archive);
-    console.log(`persistWorkingTree: uploaded archive for project ${project.id} to ${objectPath} (${Math.round(stat.size / 1024)} KB)`);
-    return { storagePath: objectPath, archiveBytes: stat.size };
+    await storageUpload(manifestPathFor(objectPath), manifestBuf, 'application/json');
+    await storageVerify(objectPath, buf.length);
+    await storageVerify(manifestPathFor(objectPath), manifestBuf.length);
+    console.log(`persistWorkingTree: uploaded and verified archive for project ${project.id} at ${objectPath} (${Math.round(buf.length / 1024)} KB)`);
+    return { storagePath: objectPath, archiveBytes: buf.length, manifest };
   } finally {
     await fs.rm(archive, { force: true }).catch(() => {});
-  }
-}
-// Lightweight persist that skips storage upload for large projects — only updates DB
-async function persistWorkingTreeLight(project, work) {
-  try {
-    return await persistWorkingTree(project, work);
-  } catch (e) {
-    console.warn(`persistWorkingTree failed for ${project.id}: ${e.message}`);
-    // Return existing storage path so the project is still usable
-    return { storagePath: project.storagePath, archiveBytes: 0 };
   }
 }
 async function countFiles(root, { includeGit = true, includeSkipped = true } = {}) {
@@ -583,18 +636,18 @@ async function snapshotProject(project, work, label) {
   try {
     await createArchive(work, archive, false);
     const hash = await sha256File(archive);
-    const existing = await queryOne('snapshots', supabase.from('snapshots').select('*').eq('project_id', project.id).eq('content_hash', hash).order('created_at', { ascending: false }).limit(1).maybeSingle());
+    const existing = await queryOne('snapshots', db => db.from('snapshots').select('*').eq('project_id', project.id).eq('content_hash', hash).order('created_at', { ascending: false }).limit(1).maybeSingle());
     if (existing) return existing;
     const stamp = new Date().toISOString().replaceAll(':', '-');
     const objectPath = `snapshots/${project.userId}/${project.id}/${stamp}-${normalizeName(label)}.tgz`;
     await storageUpload(objectPath, await fs.readFile(archive), 'application/gzip');
     const row = { id: crypto.randomUUID(), project_id: project.id, user_id: project.userId, label, created_at: nowIso(), storage_path: objectPath, content_hash: hash };
-    await queryOne('snapshots', supabase.from('snapshots').insert(row));
-    const older = await queryOne('snapshots', supabase.from('snapshots').select('*').eq('project_id', project.id).order('created_at', { ascending: false }));
+    await queryOne('snapshots', db => db.from('snapshots').insert(row));
+    const older = await queryOne('snapshots', db => db.from('snapshots').select('*').eq('project_id', project.id).order('created_at', { ascending: false }));
     const stale = (older || []).slice(MAX_SNAPSHOTS);
     if (stale.length) {
       await storageRemove(stale.map(s => s.storage_path));
-      await queryOne('snapshots', supabase.from('snapshots').delete().in('id', stale.map(s => s.id)));
+      await queryOne('snapshots', db => db.from('snapshots').delete().in('id', stale.map(s => s.id)));
     }
     return row;
   } finally {
@@ -602,12 +655,12 @@ async function snapshotProject(project, work, label) {
   }
 }
 async function listSnapshots(projectId, userId) {
-  const data = await queryOne('snapshots', supabase.from('snapshots').select('id,label,created_at,content_hash').eq('project_id', projectId).eq('user_id', String(userId)).order('created_at', { ascending: false }));
+  const data = await queryOne('snapshots', db => db.from('snapshots').select('id,label,created_at,content_hash').eq('project_id', projectId).eq('user_id', String(userId)).order('created_at', { ascending: false }));
   return (data || []).map(row => ({ id: row.id, label: row.label, createdAt: row.created_at, hash: row.content_hash }));
 }
 async function updateProject(projectId, userId, patch) {
   const current = await dbGetProject(projectId);
-  if (!current || String(current.userId) !== String(userId)) throw new Error('Project not found.');
+  if (!current || String(current.userId) !== String(userId)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
   const updated = { ...current, ...patch, updatedAt: nowIso() };
   await dbUpsertProject(updated);
   return updated;
@@ -616,23 +669,53 @@ async function updateProject(projectId, userId, patch) {
 function githubHeaders(token) {
   return { Authorization: `Bearer ${token}`, Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', 'User-Agent': APP_NAME };
 }
+// Every call times out after GITHUB_TIMEOUT_MS. Idempotent GETs are retried twice on network
+// errors, timeouts and 5xx; writes (POST/DELETE) are never retried.
 async function githubFetch(url, options = {}) {
-  const r = await fetch(url, options);
-  const text = await r.text();
-  let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
-  if (!r.ok) throw new Error((data && data.message) || `GitHub API error ${r.status}`);
-  return data;
+  const retries = (options.method || 'GET').toUpperCase() === 'GET' ? 2 : 0;
+  for (let attempt = 0; ; attempt++) {
+    let r;
+    try {
+      r = await fetch(url, { ...options, signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS) });
+    } catch (e) {
+      if (attempt < retries) { await sleep(500 * 3 ** attempt); continue; }
+      if (e.name === 'TimeoutError') throw new AppError('GITHUB_TIMEOUT', 'GitHub did not respond in time. Try again in a moment.', { status: 504, internal: `${options.method || 'GET'} ${url}: timed out after ${GITHUB_TIMEOUT_MS} ms` });
+      throw new AppError('GITHUB_UNREACHABLE', 'Could not reach GitHub. Try again in a moment.', { status: 502, internal: `${options.method || 'GET'} ${url}: ${e.cause?.code || e.message}` });
+    }
+    if (r.status >= 500 && attempt < retries) { await r.body?.cancel(); await sleep(500 * 3 ** attempt); continue; }
+    const text = await r.text();
+    let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+    if (!r.ok) throw githubError(r, data);
+    return data;
+  }
+}
+function sleep(ms) { return new Promise(resolve => setTimeout(resolve, ms)); }
+// GitHub API failures as client-safe errors; GitHub's own text only goes to the log.
+function githubError(r, data) {
+  const internal = `GitHub API ${r.status}: ${typeof data === 'string' ? data : JSON.stringify(data)}`;
+  if (r.status === 401) return new AppError('GITHUB_UNAUTHORIZED', 'GitHub authorization has expired or was revoked. Reconnect GitHub.', { status: 401, internal });
+  if ((r.status === 403 || r.status === 429) && r.headers.get('x-ratelimit-remaining') === '0') return new AppError('GITHUB_RATE_LIMITED', 'GitHub rate limit reached. Try again later.', { status: 429, internal });
+  if (r.status === 403) return new AppError('GITHUB_FORBIDDEN', 'GitHub refused this action for your account.', { status: 403, internal });
+  if (r.status === 404) return new AppError('GITHUB_NOT_FOUND', 'The GitHub repository was not found or your account cannot access it.', { status: 404, internal });
+  if (r.status === 422) {
+    const exists = /already exists/i.test(JSON.stringify(data?.errors || data?.message || ''));
+    return new AppError('GITHUB_REJECTED', exists ? 'A repository with that name already exists on your account.' : 'GitHub rejected the request.', { status: 422, internal });
+  }
+  return new AppError('GITHUB_ERROR', 'GitHub is not responding normally. Try again in a moment.', { status: 502, internal });
 }
 async function userToken(user) {
   if (!user.githubTokenEnc) return null;
   if (user.githubExpiresAt && user.githubExpiresAt - Date.now() < 60_000 && user.githubRefreshTokenEnc) {
     const refresh = decrypt(user.githubRefreshTokenEnc);
     const response = await fetch('https://github.com/login/oauth/access_token', {
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, grant_type: 'refresh_token', refresh_token: refresh })
     });
     const data = await response.json();
-    if (!response.ok || data.error || !data.access_token) throw new Error(data.error_description || 'GitHub token refresh failed. Please reconnect GitHub.');
+    if (!response.ok || data.error || !data.access_token) {
+      throw new AppError('GITHUB_UNAUTHORIZED', 'GitHub authorization has expired. Reconnect GitHub.', { status: 401, internal: `Token refresh failed: ${data.error || response.status} ${data.error_description || ''}` });
+    }
     user.githubTokenEnc = encrypt(data.access_token);
     user.githubRefreshTokenEnc = data.refresh_token ? encrypt(data.refresh_token) : user.githubRefreshTokenEnc;
     user.githubExpiresAt = data.expires_in ? Date.now() + Number(data.expires_in) * 1000 : null;
@@ -647,8 +730,31 @@ function ensureRequestProtection(req, res, next) {
   if (requestHasBearer(req)) return next();
   const origin = req.get('Origin');
   if (!origin || allowedOrigin(origin)) return next();
-  return res.status(403).json({ error: 'Cross-origin request blocked.' });
+  return res.status(403).json({ error: 'Cross-origin request blocked.', code: 'ORIGIN_NOT_ALLOWED' });
 }
+function sendError(res, e, context, fallback) {
+  const { status, body } = errorResponse(e, { context, fallback });
+  if (!res.headersSent) res.status(status).json(body);
+}
+// Resolves the signed-in user once, so per-user limits and job slots can key on it.
+async function requireUser(req, res, next) {
+  try {
+    const a = await authUser(req, res);
+    if (!a) return;
+    req.auth = a;
+    next();
+  } catch (e) { sendError(res, e, 'Authentication'); }
+}
+// Per-IP limits run before any database work; per-user limits run after requireUser.
+const MINUTE = 60 * 1000;
+const apiLimit = limiter({ windowMs: MINUTE, limit: env('RATE_LIMIT_API_PER_MINUTE', 300) });
+const authLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AUTH_PER_15_MIN', 20), text: true });
+const exchangeLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AUTH_PER_15_MIN', 20) });
+const pushLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_PUSH_PER_15_MIN', 20), key: 'user' });
+const fetchLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_FETCH_PER_15_MIN', 30), key: 'user' });
+const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_UPLOAD_PER_15_MIN', 10), key: 'user' });
+const heavyJob = jobSlot(JOB_GATE);
+app.use('/api', apiLimit);
 
 async function sanitizeGitRepository(dir) {
   const gitPath = path.join(dir, '.git');
@@ -683,22 +789,7 @@ async function withGitAuth(token, fn) {
   try { await fs.chmod(file, 0o700); return await fn({ GIT_ASKPASS: file, GH_TOKEN: token, GIT_TERMINAL_PROMPT: '0' }); }
   finally { await fs.rm(file, { force: true }); }
 }
-async function runGit(cwd, args, env = {}) {
-  return execFileAsync('git', args, {
-    cwd,
-    env: {
-      ...process.env,
-      GIT_CONFIG_NOSYSTEM: '1',
-      GIT_CONFIG_GLOBAL: os.devNull,
-      GIT_CONFIG_SYSTEM: os.devNull,
-      GIT_TERMINAL_PROMPT: '0',
-      ...env
-    },
-    maxBuffer: 50 * 1024 * 1024 // Increased from 12MB to 50MB for large repos
-  });
-}
-async function statusPorcelain(dir) { return (await runGit(dir, ['status', '--porcelain'])).stdout.trim(); }
-async function rev(dir, name) { try { return (await runGit(dir, ['rev-parse', name])).stdout.trim(); } catch { return null; } }
+const runGit = createGitRunner({ timeoutMs: GIT_TIMEOUT_MS, jobTimeoutMs: JOB_TIMEOUT_MS });
 
 function applicationFileInfo(platform, name, stat) {
   const encodedName = encodeURIComponent(name);
@@ -742,10 +833,10 @@ app.get('/api/auth/me', async (req, res) => {
     const a = await authUser(req, res, false);
     if (!a) return res.json({ authenticated: false });
     return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
-  } catch (e) { return res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Session check'); }
 });
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
-app.get('/api/auth/login', async (req, res) => {
+app.get('/api/auth/login', authLimit, async (req, res) => {
   try {
     if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
     supabaseRequired();
@@ -780,10 +871,13 @@ app.get('/api/auth/login', async (req, res) => {
     u.searchParams.set('code_challenge_method', 'S256');
     u.searchParams.set('allow_signup', process.env.GITHUB_ALLOW_SIGNUP === 'false' ? 'false' : 'true');
     res.redirect(u.toString());
-  } catch (e) { res.status(500).send(`GitHub sign-in setup failed: ${e.message}`); }
+  } catch (e) {
+    const { body } = errorResponse(e, { context: 'Sign-in setup' });
+    res.status(500).type('text/plain').send(`GitHub sign-in could not start. ${body.error}`);
+  }
 });
 
-app.get('/auth/github/callback', async (req, res) => {
+app.get('/auth/github/callback', authLimit, async (req, res) => {
   try {
     supabaseRequired();
     if (!req.query.code || !req.query.state) return res.status(400).send('Missing OAuth code/state.');
@@ -795,11 +889,14 @@ app.get('/auth/github/callback', async (req, res) => {
     }
     const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
     const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
+      signal: AbortSignal.timeout(GITHUB_TIMEOUT_MS),
       method: 'POST', headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ client_id: process.env.GITHUB_CLIENT_ID, client_secret: process.env.GITHUB_CLIENT_SECRET, code: req.query.code, state: req.query.state, redirect_uri: redirectUri, code_verifier: attempt.code_verifier })
     });
     const tokenData = await tokenResponse.json();
-    if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) throw new Error(tokenData.error_description || 'OAuth exchange failed.');
+    if (!tokenResponse.ok || tokenData.error || !tokenData.access_token) {
+      throw new AppError('OAUTH_FAILED', 'GitHub did not accept the sign-in. Please try again.', { internal: `OAuth exchange failed: ${tokenData.error || tokenResponse.status} ${tokenData.error_description || ''}` });
+    }
     const ghUser = await githubFetch('https://api.github.com/user', { headers: githubHeaders(tokenData.access_token) });
     const userId = String(ghUser.id);
     if (REQUIRE_GITHUB_ALLOWLIST && !ALLOWED_GITHUB_USER_IDS.has(userId)) return res.status(403).send('This GitHub account is not authorized to use this application.');
@@ -821,18 +918,21 @@ app.get('/auth/github/callback', async (req, res) => {
     const token = await createSession(user.id);
     res.setHeader('Set-Cookie', [clearOAuthBindingCookie(), `${SESSION_COOKIE}=${token}; ${cookieOptions()}`]);
     return res.redirect('/');
-  } catch (e) { res.status(400).send(`GitHub sign-in failed: ${e.message}`); }
+  } catch (e) {
+    const { body } = errorResponse(e, { context: 'Sign-in callback' });
+    res.status(400).type('text/plain').send(`GitHub sign-in failed. ${body.error}`);
+  }
 });
-app.post('/api/auth/exchange', ensureRequestProtection, async (req, res) => {
+app.post('/api/auth/exchange', exchangeLimit, ensureRequestProtection, async (req, res) => {
   try {
-    const code = String(req.body?.code || '');
-    if (!code) return res.status(400).json({ error: 'Missing login code.' });
+    const code = parseOptionalString(req.body?.code, 'Login code', { max: 200 }) || '';
+    if (!code) return res.status(400).json({ error: 'Missing login code.', code: 'INVALID_LOGIN_CODE' });
     const row = await consumeLoginCode(code);
-    if (!row) return res.status(401).json({ error: 'Login code is invalid or expired.' });
+    if (!row) return res.status(401).json({ error: 'Login code is invalid or expired.', code: 'INVALID_LOGIN_CODE' });
     const token = await createSession(row.user_id);
     const user = await dbGetUser(row.user_id);
     return res.json({ token, user: { login: user.login, name: user.name, avatar: user.avatar } });
-  } catch (e) { return res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Login code exchange'); }
 });
 app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
   try {
@@ -841,27 +941,27 @@ app.post('/api/auth/logout', ensureRequestProtection, async (req, res) => {
     await deleteSession(bearer || cookie);
     if (cookie) res.setHeader('Set-Cookie', `${SESSION_COOKIE}=; ${cookieOptions()}; Max-Age=0`);
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Logout'); }
 });
 
-app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { res.status(500).json({ error: e.message }); } });
+app.get('/api/applications', async (_req, res) => { try { res.setHeader('Cache-Control', 'no-store'); res.json(await listApplications()); } catch (e) { sendError(res, e, 'List applications'); } });
 app.get('/api/applications/download/:platform/:name', async (req, res) => {
   const { platform, name } = req.params;
-  if (!validApplication(platform, name)) return res.status(404).json({ error: 'Application build not found.' });
+  if (!validApplication(platform, name)) return res.status(404).json({ error: 'Application build not found.', code: 'NOT_FOUND' });
   const file = path.join(APPLICATIONS, platform, name);
-  try { await fs.access(file); res.download(file, name); } catch { res.status(404).json({ error: 'Application build not found.' }); }
+  try { await fs.access(file); res.download(file, name); } catch { res.status(404).json({ error: 'Application build not found.', code: 'NOT_FOUND' }); }
 });
 
 app.get('/api/events/ticket', async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
-  try { res.json({ ticket: await createSseTicket(a.user.id) }); } catch (e) { res.status(500).json({ error: e.message }); }
+  try { res.json({ ticket: await createSseTicket(a.user.id) }); } catch (e) { sendError(res, e, 'Event ticket'); }
 });
 app.get('/api/events', async (req, res) => {
   try {
     let auth = null;
     if (req.query.ticket) auth = await consumeSseTicket(String(req.query.ticket));
     else auth = await authUser(req, res, false);
-    if (!auth?.user) return res.status(401).json({ error: 'Not authenticated.' });
+    if (!auth?.user) return res.status(401).json({ error: 'Not authenticated.', code: 'NOT_SIGNED_IN' });
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
@@ -871,7 +971,7 @@ app.get('/api/events', async (req, res) => {
     broadcastClient(res, { type: 'connected' });
     const heartbeat = setInterval(() => { try { res.write(': keep-alive\n\n'); } catch {} }, 25000);
     req.on('close', () => { clearInterval(heartbeat); clients.delete(res); });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Event stream'); }
 });
 
 app.get('/api/projects', async (req, res) => {
@@ -879,24 +979,25 @@ app.get('/api/projects', async (req, res) => {
   try {
     const list = await dbListProjects(a.user.id);
     res.json(list.map(p => ({ ...p, files: p.fileCount })));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'List projects'); }
 });
+// Auth, rate limit and a job slot are checked before multer reads any of the upload.
 app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
   const len = Number(req.headers['content-length'] || 0);
-  if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.` });
+  if (len && len > MAX_TOTAL_UPLOAD + 1024 * 1024) return res.status(413).json({ error: `Upload exceeds the ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB total limit.`, code: 'UPLOAD_TOO_LARGE' });
   next();
-}, upload.array('files', MAX_FILES), async (req, res) => {
-  const a = await authUser(req, res); if (!a) return;
+}, requireUser, uploadLimit, heavyJob, upload.array('files', MAX_FILES), runJob(async (req, res) => {
+  const a = req.auth;
   let workspace = null;
   try {
     const files = req.files || [];
-    if (!files.length) throw new Error('Choose at least one file.');
+    if (!files.length) throw new AppError('NO_FILES', 'Choose at least one file.');
     let total = 0;
     let skipped = 0;
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-upload-'));
     for (const file of files) {
       total += Number(file.size || 0);
-      if (total > MAX_TOTAL_UPLOAD) throw new Error(`Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`);
+      if (total > MAX_TOTAL_UPLOAD) throw new AppError('UPLOAD_TOO_LARGE', `Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`, { status: 413 });
       const rel = safeRelative(file.originalname);
       if (!rel) { skipped++; console.warn(`Skipped file with invalid path: "${file.originalname}" (size: ${file.size} bytes)`); continue; }
       const target = path.join(workspace, rel);
@@ -926,22 +1027,30 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     console.log(`Upload complete: ${uploadedCount} total files (${storedCount} stored, ${uploadedCount - storedCount} excluded from .git/skip dirs) in workspace out of ${files.length} uploaded for project "${req.body.projectName || 'unnamed'}"`);
     const id = crypto.randomUUID();
     const first = files[0]?.originalname || 'project';
-    const name = normalizeName(req.body.projectName || first.split(/[\\/]/)[0]);
+    const name = normalizeName(parseOptionalString(req.body.projectName, 'Project name') || first.split(/[\\/]/)[0]);
     const storagePath = `projects/${a.user.id}/${id}/working.tgz`;
     const project = { id, userId: a.user.id, name, createdAt: nowIso(), updatedAt: nowIso(), syncState: 'local', syncMessage: 'Stored in persistent cloud storage.', fileCount: uploadedCount, storagePath };
-    let syncMsg = 'Stored in persistent cloud storage.';
+    // A project is only created once its files are verifiably in Storage; a project without a
+    // stored copy would later push as an empty repository.
     await withProjectLock(id, async () => {
+      let persisted;
       try {
-        const persisted = await persistWorkingTree(project, workspace);
-        project.storagePath = persisted.storagePath;
+        persisted = await persistWorkingTree(project, workspace);
+        if (persisted.manifest.fileCount === 0) {
+          throw new AppError('NOTHING_TO_STORE', `None of the ${uploadedCount} uploaded files can be stored because they are all inside .git or generated folders (${[...ARCHIVE_SKIP_NAMES].join(', ')}).`, { status: 422 });
+        }
       } catch (e) {
-        console.warn(`Add project: working tree persistence skipped for large project (${uploadedCount} files): ${e.message}`);
-        syncMsg += ' (Cloud backup skipped: project too large.)';
-        project.syncMessage = syncMsg;
-        // Clear storagePath so withWorkspace knows not to try downloading a non-existent archive
-        project.storagePath = null;
+        await storageRemove([storagePath, manifestPathFor(storagePath)]).catch(err => console.error(`Add project: cleanup failed: ${err.message}`));
+        if (e instanceof AppError) throw e;
+        throw new AppError('STORAGE_FAILED', 'The project could not be saved to cloud storage, so it was not added. Try again; if it keeps failing, the project may be over the storage size limit.', { status: 502, internal: `could not store ${uploadedCount} files: ${e.message}` });
       }
-      await dbUpsertProject(project);
+      project.storagePath = persisted.storagePath;
+      try {
+        await dbUpsertProject(project);
+      } catch (e) {
+        await storageRemove([storagePath, manifestPathFor(storagePath)]).catch(err => console.error(`Add project: cleanup failed: ${err.message}`));
+        throw e;
+      }
     });
     broadcast(a.user.id, { type: 'projects-changed', projectId: id });
     res.json({ ...project, files: project.fileCount });
@@ -949,39 +1058,40 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     // If the database is missing the change tracking columns, give a clear message
     if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
       console.error('Add project failed: missing database columns. Run supabase/schema.sql to add them.');
-      res.status(500).json({ error: 'Database schema is outdated. Please contact the admin to run the updated supabase/schema.sql.' });
+      res.status(500).json({ error: 'Database schema is outdated. Please contact the admin to run the updated supabase/schema.sql.', code: 'SCHEMA_OUTDATED' });
     } else {
-      console.error('Add project failed:', e.message, e.stack?.split('\n').slice(0, 3).join('\n'));
-      res.status(500).json({ error: e.message });
+      sendError(res, e, 'Add project', 'The project could not be added.');
     }
   } finally {
     for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
     if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
   }
-});
+}));
 app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   try {
-    const project = await dbGetProject(req.params.id);
-    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
+    const project = await dbGetProject(parseProjectId(req.params.id));
+    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
+    let leftover = [];
     await withProjectLock(project.id, async () => {
-      const snapshots = await queryOne('snapshots', supabase.from('snapshots').select('storage_path').eq('project_id', project.id));
-      const objects = [project.storagePath, ...(snapshots || []).map(x => x.storage_path)].filter(Boolean);
-      await storageRemove(objects);
-      if (snapshots?.length) await queryOne('snapshots', supabase.from('snapshots').delete().eq('project_id', project.id));
+      const snapshots = await queryOne('snapshots', db => db.from('snapshots').select('storage_path').eq('project_id', project.id));
+      // Rows go first: a failed row delete must never leave a project pointing at removed storage.
+      if (snapshots?.length) await queryOne('snapshots', db => db.from('snapshots').delete().eq('project_id', project.id));
       await dbDeleteProject(project.id, a.user.id);
+      const known = [project.storagePath, project.storagePath && manifestPathFor(project.storagePath), ...(snapshots || []).map(x => x.storage_path)].filter(Boolean);
+      leftover = await removeProjectObjects(project, known);
     });
     broadcast(a.user.id, { type: 'projects-changed' });
-    res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+    res.json({ ok: true, ...(leftover.length ? { warnings: ['The project was removed, but some of its cloud files could not be deleted. They will not be used again.'] } : {}) });
+  } catch (e) { sendError(res, e, 'Remove project'); }
 });
 app.get('/api/projects/:id/history', async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   try {
-    const project = await dbGetProject(req.params.id);
-    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
+    const project = await dbGetProject(parseProjectId(req.params.id));
+    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
     res.json(await listSnapshots(project.id, a.user.id));
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'Project history'); }
 });
 
 app.get('/api/github/repos', async (req, res) => {
@@ -995,133 +1105,165 @@ app.get('/api/github/repos', async (req, res) => {
       if (data.length < 100) break;
     }
     res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
-  } catch (e) { res.status(502).json({ error: e.message }); }
+  } catch (e) { sendError(res, e, 'List GitHub repositories'); }
 });
-app.post('/api/github/fetch', ensureRequestProtection, async (req, res) => {
+app.post('/api/github/fetch', ensureRequestProtection, requireUser, fetchLimit, heavyJob, runJob(async (req, res) => {
   res.setTimeout(600000); // 10 minutes for large project fetch
-  const a = await authUser(req, res); if (!a) return;
-  const { projectId } = req.body || {};
-  if (!projectId) return res.status(400).json({ error: 'Select a project.' });
+  const a = req.auth;
+  let projectId;
   try {
+    projectId = parseProjectId(req.body?.projectId);
     const project = await dbGetProject(projectId);
-    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
-    if (!project.repoFullName) return res.status(400).json({ error: 'Project is not connected to a GitHub repository. Push it first.' });
+    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
+    if (!project.repoFullName) return res.status(400).json({ error: 'Project is not connected to a GitHub repository. Push it first.', code: 'PROJECT_NOT_CONNECTED' });
     console.log(`Manual fetch requested for project ${project.id} (${project.repoFullName}, branch: ${project.branch || 'main'})`);
     await syncProjectForUser(a.user, project);
     const updated = await dbGetProject(projectId);
     console.log(`Fetch completed for project ${project.id}, sync state: ${updated?.syncState}, message: ${updated?.syncMessage}`);
     res.json({ ok: true, project: { ...updated, files: updated?.fileCount } });
   } catch (e) {
-    console.error(`Fetch failed for project ${projectId}:`, e.message, e.stderr || '');
-    const errorMsg = e.stderr || e.stdout || e.message || 'Fetch failed.';
-    res.status(500).json({ error: errorMsg });
+    sendError(res, e, `Fetch for project ${projectId}`, 'Fetch failed.');
   }
-});
-app.post('/api/github/push', ensureRequestProtection, async (req, res) => {
-  res.setTimeout(600000); // 10 minutes for large project pushes
-  const a = await authUser(req, res); if (!a) return;
-  const { projectId, repoId, repoName, visibility = 'private', branch = 'main' } = req.body || {};
-  if (!projectId) return res.status(400).json({ error: 'Select a project.' });
+}));
+// Validates every push input up front; the returned values are the only ones used afterwards.
+async function parsePushRequest(body = {}) {
+  const input = {
+    projectId: parseProjectId(body.projectId),
+    repoId: parseRepoId(body.repoId),
+    repoName: parseOptionalString(body.repoName, 'Repository name', { max: 100 }),
+    visibility: parseEnum(body.visibility, 'Visibility', ['private', 'public'], 'private'),
+    branch: parseBranch(body.branch),
+    conflictResolution: parseEnum(body.conflictResolution, 'Conflict resolution', ['keep-local'], null)
+  };
   try {
-    const project = await dbGetProject(projectId);
-    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.' });
+    await runGit(os.tmpdir(), ['check-ref-format', '--branch', input.branch]);
+  } catch {
+    throw new AppError('INVALID_BRANCH', `"${input.branch}" is not a valid branch name.`);
+  }
+  return input;
+}
+const repoPath = fullName => String(fullName).split('/').map(encodeURIComponent).join('/');
+const SAFE_WARNING = {
+  beforeSnapshot: 'The before-push snapshot could not be saved.',
+  afterSnapshot: 'The after-push snapshot could not be saved.',
+  cloudCopy: 'The cloud copy of the project could not be updated; the next push will start from the previous copy.',
+  record: 'The project record could not be updated.'
+};
+
+app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, heavyJob, runJob(async (req, res) => {
+  res.setTimeout(600000); // 10 minutes for large project pushes
+  const a = req.auth;
+  let input;
+  try {
+    input = await parsePushRequest(req.body);
+  } catch (e) { return sendError(res, e, 'Push request'); }
+  const { projectId, repoId, repoName, visibility, branch, conflictResolution } = input;
+  let project;
+  try {
+    project = await dbGetProject(projectId);
+    if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
+    // Checked before any heavy work so a bad name is a quick 400.
+    if (!repoId) assertRepoName(normalizeName(repoName || project.name));
     const token = await userToken(a.user);
+    if (!token) throw new PushError('GITHUB_NOT_CONNECTED', 'Connect GitHub before pushing.', { status: 401 });
+    const github = (url, options = {}) => githubFetch(url, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } });
+    const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
+    let result;
     await withProjectLock(project.id, async () => {
-      let repo;
-      if (repoId) repo = await githubFetch(`https://api.github.com/repositories/${repoId}`, { headers: githubHeaders(token) });
-      else {
-        const repoNameNorm = normalizeName(repoName || project.name);
-        // Check if the repo already exists before trying to create it
-        try {
-          repo = await githubFetch(`https://api.github.com/repos/${(await githubFetch('https://api.github.com/user', { headers: githubHeaders(token) })).login}/${repoNameNorm}`, { headers: githubHeaders(token) });
-        } catch {
-          repo = await githubFetch('https://api.github.com/user/repos', { method: 'POST', headers: { ...githubHeaders(token), 'Content-Type': 'application/json' }, body: JSON.stringify({ name: repoNameNorm, private: visibility !== 'public', auto_init: false }) });
-        }
-      }
-      let updatedProject = { ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch };
-      await withWorkspace(project, async dir => {
-        const beforeFiles = await countFiles(dir, { includeGit: false, includeSkipped: false });
-        console.log(`Push workspace: ${beforeFiles} files before git setup for project ${project.id} (storagePath: ${project.storagePath || 'none'})`);
-        if (beforeFiles === 0) {
-          if (project.storagePath) {
-            console.warn(`Push workspace is empty for project ${project.id}: archive existed at ${project.storagePath} but extracted 0 files. Pushing empty repo.`);
-          } else {
-            console.warn(`Push workspace is empty for project ${project.id}: no storage archive found. Pushing empty repo.`);
-          }
-        }
-        await snapshotProject(updatedProject, dir, 'before-push').catch(e => console.warn(`Before-push snapshot skipped: ${e.message}`));
-        await ensureGit(dir, repo.clone_url);
-        await withGitAuth(token, async env => {
-          await runGit(dir, ['fetch', 'origin'], env).catch(() => {});
-          const remoteBranch = repo.default_branch || branch;
-          const remoteRef = await rev(dir, `origin/${remoteBranch}`);
-          const head = await rev(dir, 'HEAD');
-          await runGit(dir, ['branch', '-M', branch], env);
-          // Always pull remote changes first to ensure remote files are in the workspace
-          if (remoteRef) {
-            if (!head) {
-              // No local commit yet: checkout remote branch, then overlay local files
-              await runGit(dir, ['checkout', '-b', branch, 'origin/' + remoteBranch], env).catch(() => {
-                return runGit(dir, ['reset', '--hard', 'origin/' + remoteBranch], env);
-              });
-            } else {
-              // Both local and remote exist: merge remote into local, keeping local files on conflict
-              try {
-                await runGit(dir, ['pull', '--allow-unrelated-histories', 'origin', remoteBranch, '--no-edit'], env);
-              } catch {
-                // Merge conflict: keep local files
-                await runGit(dir, ['checkout', '--ours', '--', '.'], env).catch(() => {});
-                await runGit(dir, ['add', '-A'], env);
-                await runGit(dir, ['commit', '-m', `Resolve merge: keep local files ${nowIso()}`], env).catch(() => {});
-              }
+      result = await performPush({
+        project,
+        branch,
+        keepLocalOnConflict: conflictResolution === 'keep-local',
+        message: `Sync from ${APP_NAME} ${nowIso()}`,
+        deps: {
+          withWorkspace,
+          prepareGit: ensureGit,
+          log: line => console.log(`Push ${project.id}: ${line}`),
+          // Called only after the workspace has been restored and verified.
+          async resolveRepo() {
+            if (repoId) return { repo: await github(`https://api.github.com/repositories/${repoId}`), created: false };
+            const name = normalizeName(repoName || project.name);
+            const login = (await github('https://api.github.com/user')).login;
+            try {
+              return { repo: await github(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`), created: false };
+            } catch (e) {
+              if (e.status !== 404) throw e;
             }
+            const repo = await github('https://api.github.com/user/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, private: visibility !== 'public', auto_init: false }) });
+            return { repo, created: true };
+          },
+          // Deletes only a repository that still has no branches, i.e. nothing ever landed in it.
+          async deleteRepo(repo) {
+            const branches = await github(`https://api.github.com/repos/${repoPath(repo.full_name)}/branches?per_page=1`);
+            if (Array.isArray(branches) && branches.length) throw new Error('repository is not empty; leaving it in place');
+            await github(`https://api.github.com/repos/${repoPath(repo.full_name)}`, { method: 'DELETE' });
+          },
+          gitFor: (dir, fn) => withGitAuth(token, env => fn((args, opts) => runGit(dir, args, env, { ...opts, signal: deadline }))),
+          async remoteTreeCount(repo, sha) {
+            if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new AppError('VERIFY_FAILED', 'Push finished but the commit id could not be verified.', { status: 502 });
+            const tree = await github(`https://api.github.com/repos/${repoPath(repo.full_name)}/git/trees/${sha}?recursive=1`);
+            return { count: (tree.tree || []).filter(entry => entry.type !== 'tree').length, truncated: Boolean(tree.truncated) };
+          },
+          async beforePush(dir) {
+            const warnings = [];
+            await snapshotProject(project, dir, 'before-push').catch(e => { console.error(`Push ${project.id}: before-push snapshot: ${e.message}`); warnings.push(SAFE_WARNING.beforeSnapshot); });
+            return warnings;
+          },
+          // The push already landed; anything that fails here is reported as a warning, never hidden.
+          async afterPush(dir, repo, outcome, earlierWarnings) {
+            const warnings = [];
+            const updated = {
+              ...project, repoId: repo.id, repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: repo.clone_url, branch,
+              lastPushedAt: nowIso(), lastPushedCommit: outcome.commit, syncState: 'synced', lastLocalChangeAt: nowIso()
+            };
+            await snapshotProject(updated, dir, 'after-push').catch(e => { console.error(`Push ${project.id}: after-push snapshot: ${e.message}`); warnings.push(SAFE_WARNING.afterSnapshot); });
+            try {
+              const persisted = await persistWorkingTree(updated, dir);
+              updated.storagePath = persisted.storagePath;
+              updated.fileCount = persisted.manifest.fileCount;
+            } catch (e) {
+              console.error(`Push ${project.id}: cloud copy: ${e.message}`);
+              warnings.push(SAFE_WARNING.cloudCopy);
+            }
+            const summary = outcome.outcome === 'no-changes' ? 'Already up to date: GitHub has the same files.' : `Pushed ${outcome.fileCount} files (commit ${outcome.commit.slice(0, 7)}).`;
+            const specialNote = outcome.special.length ? `${outcome.special.length} symbolic link(s) or submodule(s) on GitHub are not copied into this project and were left unchanged.` : '';
+            updated.syncMessage = [summary, specialNote, ...earlierWarnings, ...warnings].filter(Boolean).join(' ');
+            if (earlierWarnings.length || warnings.length) updated.syncState = 'warning';
+            try {
+              await dbUpsertProject(updated);
+            } catch (e) {
+              console.error(`Push ${project.id}: project record: ${e.message}`);
+              warnings.push(SAFE_WARNING.record);
+            }
+            Object.assign(project, updated);
+            return warnings;
           }
-          // Stage all files (including any newly pulled remote files)
-          await runGit(dir, ['add', '-A'], env);
-          let changes = true;
-          try { await runGit(dir, ['diff', '--cached', '--quiet'], env); changes = false; } catch {}
-          if (changes) {
-            await runGit(dir, ['commit', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
-          } else {
-            await runGit(dir, ['commit', '--allow-empty', '-m', `Sync from ${APP_NAME} ${nowIso()}`], env);
-          }
-          await runGit(dir, ['push', '-f', '-u', 'origin', branch], env);
-        });
-        const commit = await rev(dir, 'HEAD');
-        const afterFiles = await countFiles(dir, { includeGit: false, includeSkipped: false });
-        console.log(`Push workspace: ${afterFiles} files after push for project ${project.id}`);
-        // Post-push persistence: if storage upload fails (e.g., large project), still report push success
-        let storagePath = project.storagePath;
-        let syncMessage = beforeFiles === 0
-          ? `Push completed (warning: workspace was empty with 0 files; expected ${project.fileCount || 'unknown'} files. Files may not have been uploaded correctly.)`
-          : 'Push completed.';
-        try {
-          await snapshotProject(updatedProject, dir, 'after-push');
-        } catch (e) {
-          console.warn(`After-push snapshot skipped: ${e.message}`);
-          syncMessage += ' (Snapshot skipped: archive too large.)';
         }
-        try {
-          const persisted = await persistWorkingTree(updatedProject, dir);
-          storagePath = persisted.storagePath;
-        } catch (e) {
-          console.warn(`Working tree persistence skipped: ${e.message}`);
-          syncMessage += ' (Working tree persistence skipped: archive too large.)';
-        }
-        updatedProject = { ...updatedProject, storagePath, fileCount: afterFiles, lastPushedAt: nowIso(), lastPushedCommit: commit, syncState: 'synced', syncMessage, lastLocalChangeAt: nowIso() };
       });
-      await dbUpsertProject(updatedProject).catch(e => console.warn(`Database upsert after push skipped: ${e.message}`));
-      project.lastPushedAt = updatedProject.lastPushedAt;
-      Object.assign(project, updatedProject);
     });
     broadcast(a.user.id, { type: 'project-updated', projectId: project.id, reason: 'push' });
-    res.json({ ok: true, repo: { full_name: project.repoFullName, html_url: project.repoUrl }, project: { ...project, files: project.fileCount } });
+    res.json({
+      ok: true,
+      outcome: result.outcome,
+      commit: result.commit,
+      created: result.created,
+      restoredFromGitHub: result.restored.length,
+      overwritten: result.overwritten,
+      skippedSpecial: result.special,
+      warnings: result.warnings,
+      repo: { full_name: result.repo.full_name, html_url: result.repo.html_url },
+      project: { ...project, files: project.fileCount }
+    });
   } catch (e) {
-    const errorMsg = e.stderr || e.stdout || e.message || 'Push failed.';
-    await updateProject(projectId, a.user.id, { syncState: 'error', syncMessage: errorMsg }).catch(() => {});
-    res.status(500).json({ error: errorMsg });
+    const { status, body } = errorResponse(e, { context: `Push for project ${projectId}`, fallback: 'Push failed because of a server error.' });
+    if (e.details?.cleanup) body.error = `${body.error} ${e.details.cleanup}`;
+    if (project) {
+      await updateProject(projectId, a.user.id, { syncState: e.code === 'CONFLICT' ? 'conflict' : 'error', syncMessage: body.error })
+        .catch(err => console.error(`Push ${projectId}: could not record failure: ${err.message}`));
+    }
+    res.status(status).json(body);
   }
-});
+}));
 
 async function syncProjectForUser(user, project) {
   if (!project.repoFullName) return;
@@ -1134,84 +1276,41 @@ async function syncProjectForUser(user, project) {
   await withProjectLock(project.id, async () => {
     const token = await userToken(user);
     if (!token) return;
-    await withWorkspace(project, async dir => {
-      try {
+    try {
+      await withWorkspace(project, async dir => {
         await ensureGit(dir, project.remoteUrl);
-        const dirty = await statusPorcelain(dir);
-        const before = await rev(dir, 'HEAD');
-        await withGitAuth(token, async env => runGit(dir, ['fetch', 'origin', branch], env));
-        const remote = await rev(dir, `origin/${branch}`);
-        if (!remote) return;
-        // If no local HEAD (fresh workspace from storage restore), checkout remote branch directly
-        if (!before) {
-          if (dirty) {
-            // Local files exist but no commit yet: commit them first, then merge remote
-            await withGitAuth(token, async env => {
-              await runGit(dir, ['checkout', '-b', branch], env);
-              await runGit(dir, ['add', '-A'], env);
-              try { await runGit(dir, ['commit', '-m', `Initial commit ${nowIso()}`], env); } catch {}
-              try {
-                await runGit(dir, ['pull', '--allow-unrelated-histories', 'origin', branch, '--no-edit'], env);
-              } catch {
-                await runGit(dir, ['checkout', '--ours', '--', '.'], env).catch(() => {});
-                await runGit(dir, ['add', '-A'], env);
-                await runGit(dir, ['commit', '-m', `Resolve merge: keep local files ${nowIso()}`], env).catch(() => {});
-              }
-            });
-          } else {
-            // Clean workspace: just checkout the remote branch
-            await withGitAuth(token, async env => {
-              await runGit(dir, ['checkout', '-b', branch, 'origin/' + branch], env).catch(() => {
-                return runGit(dir, ['reset', '--hard', 'origin/' + branch], env);
-              });
-            });
-          }
-          const after = await rev(dir, 'HEAD');
-          const fileCount = await countFiles(dir, { includeGit: false, includeSkipped: false });
-          let storagePath = project.storagePath;
-          let syncMessage = 'Remote changes pulled automatically.';
-          try {
-            const persisted = await persistWorkingTree(project, dir);
-            storagePath = persisted.storagePath;
-          } catch (e) {
-            console.warn(`Sync: working tree persistence skipped for large project (${fileCount} files): ${e.message}`);
-            syncMessage += ' (Cloud backup skipped: project too large.)';
-          }
-          await updateProject(project.id, user.id, { storagePath, fileCount, syncState: 'synced', syncMessage, lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
-          broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
+        // Pull only when the stored copy is unchanged since the last push/pull; never merge over local edits.
+        const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
+        const plan = await withGitAuth(token, env => planPull({ git: (args, opts) => runGit(dir, args, env, { ...opts, signal: deadline }), dir, branch, knownCommit: lastKnownCommit(project) }));
+        if (plan.action === 'none') {
+          if (plan.reason === 'remote-branch-missing') throw new AppError('BRANCH_MISSING', `Branch ${branch} no longer exists on GitHub.`);
           return;
         }
-        if (remote === before) return;
-        if (dirty) {
-          await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: 'Remote changes detected but local edits were left untouched.', lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
+        if (plan.action === 'conflict') {
+          if (project.syncState === 'conflict' && project.syncMessage === plan.reason) return; // already reported
+          await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: plan.reason, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
           broadcast(user.id, { type: 'sync-conflict', projectId: project.id });
           return;
         }
-        await snapshotProject(project, dir, 'before-pull').catch(e => console.warn(`Sync snapshot skipped: ${e.message}`));
-        await withGitAuth(token, async env => runGit(dir, ['pull', '--ff-only', 'origin', branch], env));
-        const after = await rev(dir, 'HEAD');
         await snapshotProject(project, dir, 'after-pull').catch(e => console.warn(`Sync snapshot skipped: ${e.message}`));
-        // Use lightweight persist for large projects — don't fail sync if storage upload fails
-        const fileCount = await countFiles(dir, { includeGit: false, includeSkipped: false });
-        let storagePath = project.storagePath;
-        let syncMessage = 'Remote changes pulled automatically.';
-        try {
-          const persisted = await persistWorkingTree(project, dir);
-          storagePath = persisted.storagePath;
-        } catch (e) {
-          console.warn(`Sync: working tree persistence skipped for large project (${fileCount} files): ${e.message}`);
-          syncMessage += ' (Cloud backup skipped: project too large.)';
-        }
-        await updateProject(project.id, user.id, { storagePath, fileCount, syncState: 'synced', syncMessage, lastSyncAt: nowIso(), lastPulledCommit: after, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
+        // The pull is only real once the cloud copy holds it; a failed upload is an error, not a footnote.
+        const persisted = await persistWorkingTree(project, dir);
+        const specialNote = plan.special.length ? ` ${plan.special.length} symbolic link(s) or submodule(s) on GitHub were not copied into the project.` : '';
+        await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: persisted.manifest.fileCount, syncState: 'synced', syncMessage: `Remote changes pulled automatically.${specialNote}`, lastSyncAt: nowIso(), lastPulledCommit: plan.remote, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
         broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
-      } catch (e) {
-        console.error(`Sync failed for project ${project.id}:`, e.message, e.stderr || '');
-        await updateProject(project.id, user.id, { syncState: 'error', syncMessage: e.stderr || e.message, lastCheckedAt: nowIso() }).catch(() => {});
-        broadcast(user.id, { type: 'sync-error', projectId: project.id });
-      }
-    });
+      });
+    } catch (e) {
+      // A stable, client-safe message (no per-error ref) so a repeating failure is reported once.
+      const message = e instanceof AppError ? e.message.replace(' Nothing was sent to GitHub.', '') : 'Automatic sync failed because of a server error.';
+      console.error(`Sync failed for project ${project.id}:`, e instanceof AppError ? `[${e.code}] ${e.internal || e.message}` : (e?.stack || e), e?.stderr || '');
+      if (project.syncState === 'error' && project.syncMessage === message) return; // already reported
+      await updateProject(project.id, user.id, { syncState: 'error', syncMessage: message, lastCheckedAt: nowIso() })
+        .catch(err => console.error(`Sync ${project.id}: could not record failure: ${err.message}`));
+      broadcast(user.id, { type: 'sync-error', projectId: project.id });
+    }
   });
 }
+const BACKGROUND_JOB_KEY = 'background:sync';
 let syncRunning = false;
 async function syncAll() {
   if (syncRunning || !supabase) return;
@@ -1223,12 +1322,17 @@ async function syncAll() {
       try {
         const projects = await dbListProjects(user.id);
         for (const project of projects) {
-          if (project.repoFullName) {
-            try {
-              await syncProjectForUser(user, project);
-            } catch (e) {
-              console.error(`Auto-sync failed for project ${project.id}:`, e.message);
-            }
+          if (!project.repoFullName) continue;
+          // Background sync counts toward MAX_CONCURRENT_JOBS like user jobs (at most one slot,
+          // keyed separately from users). When the server is busy the project waits for the next cycle.
+          const slot = JOB_GATE.tryAcquire(BACKGROUND_JOB_KEY);
+          if (!slot.ok) continue;
+          try {
+            await syncProjectForUser(user, project);
+          } catch (e) {
+            console.error(`Auto-sync failed for project ${project.id}:`, e.message);
+          } finally {
+            slot.release();
           }
         }
       } catch (e) {
@@ -1248,14 +1352,15 @@ app.get('/api/health', async (_req, res) => {
   if (supabase) {
     const { error } = await supabase.from('users').select('id').limit(1);
     datastore = error ? 'error' : 'ready';
-    if (error && isProd) return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, error: 'Persistent datastore is unavailable.' });
+    if (error && isProd) return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, error: 'Persistent datastore is unavailable.', code: 'DATASTORE_UNAVAILABLE' });
   }
   res.json({ ok: true, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS });
 });
 
 app.use((err, _req, res, next) => {
-  if (err instanceof multer.MulterError) return res.status(413).json({ error: `Upload rejected: ${err.message}` });
-  if (err) return res.status(500).json({ error: 'Unexpected server error.' });
+  if (err instanceof multer.MulterError) return res.status(413).json({ error: `Upload rejected: ${err.message}`, code: 'UPLOAD_REJECTED' });
+  if (err?.type === 'entity.parse.failed') return res.status(400).json({ error: 'The request body is not valid JSON.', code: 'INVALID_JSON' });
+  if (err) return sendError(res, err, 'Unhandled request error');
   next();
 });
 
@@ -1272,6 +1377,9 @@ if (supabase) {
   setInterval(() => { cleanupAuthRecords(); }, 15 * 60 * 1000).unref();
   setInterval(() => { syncAll(); }, SYNC_MS).unref();
 }
+
+// Unknown API paths are JSON 404s, not the HTML app shell below.
+app.all('/api/{*splat}', (_req, res) => res.status(404).json({ error: 'Not found.', code: 'NOT_FOUND' }));
 
 // Backend-hosted UI remains available. GitHub Pages publishes public/ separately.
 app.get('/{*splat}', (_req, res) => res.sendFile(path.join(ROOT, 'public', 'index.html')));

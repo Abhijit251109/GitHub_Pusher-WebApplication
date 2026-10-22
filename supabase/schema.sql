@@ -101,6 +101,7 @@ alter table public.projects enable row level security;
 alter table public.snapshots enable row level security;
 
 -- Private object bucket for project archives and snapshots.
+-- 209715200 bytes = 200 MB; keep equal to the server's MAX_ARCHIVE_MB default (200).
 insert into storage.buckets (id, name, public, file_size_limit)
 values ('gpp-private', 'gpp-private', false, 209715200)
 on conflict (id) do update set public = excluded.public, file_size_limit = excluded.file_size_limit;

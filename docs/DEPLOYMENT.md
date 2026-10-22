@@ -91,11 +91,11 @@ A Render restart, spin-down, or redeploy therefore does not delete the project's
 
 The application defaults to:
 
-- `MAX_TOTAL_UPLOAD_MB=40`
-- `MAX_ARCHIVE_MB=45`
+- `MAX_TOTAL_UPLOAD_MB=500`
+- `MAX_ARCHIVE_MB=200` (the same as the `gpp-private` bucket's `file_size_limit` in `supabase/schema.sql`; keep the two equal)
 - `MAX_SNAPSHOTS_PER_PROJECT=10`
 
-These conservative values keep ordinary archives under Supabase Free's per-file upload ceiling and help control storage usage. Supabase Free currently includes 1 GB of file storage and 500 MB of database size, so this is best suited to personal projects rather than a large multi-user platform.
+On Supabase Free, which has a lower per-file upload ceiling, set `MAX_TOTAL_UPLOAD_MB=40` and `MAX_ARCHIVE_MB=45` so ordinary archives stay under it and storage use stays small. Supabase Free currently includes 1 GB of file storage and 500 MB of database size, so this is best suited to personal projects rather than a large multi-user platform.
 
 ## 8. Security model
 

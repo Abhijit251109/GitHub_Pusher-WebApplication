@@ -17,3 +17,7 @@ release/
 *.env.local
 *.env.production
 *.env.backup
+
+#script and prompts
+orchestrate.sh
+qa-prompts.md
