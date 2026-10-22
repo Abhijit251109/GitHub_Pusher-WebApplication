@@ -30,7 +30,10 @@ Push safety rules:
 - Files changed on GitHub that you did not change are kept. If the same file changed in both places, the push stops and lists the files. You then choose to overwrite them with your versions or cancel.
 - A push only reports success after GitHub shows the new commit with the expected number of files. If nothing changed, it says so instead of making an empty commit.
 - Before a new repository is created, the app proves git can use your GitHub login and stages your files locally, so problems found on the server never leave a repository behind.
-- New repositories are only created when your login includes the `delete_repo` permission. If a push into a repository it just created fails, the app deletes that repository, but only after confirming on GitHub that nothing landed in it. If you signed in before this permission was requested, sign out and sign in again; pushing into existing repositories works without it. If the push was cut off by a timeout, the error message links to the repository so you can check it.
+- If a push into a repository it just created still fails, what happens depends on whether the server operator enabled the `delete_repo` permission (off by default):
+  - Without it, the repository stays. The error names it and links to it, and it is linked to the project, so pushing again fills that same repository instead of creating another. Delete it on GitHub if you don't want it.
+  - With it, the app deletes the repository, but only after confirming on GitHub that nothing landed in it.
+  - If the push was cut off by a timeout, nothing is deleted; the error links to the repository so you can check it.
 
 ## Automatic pull
 

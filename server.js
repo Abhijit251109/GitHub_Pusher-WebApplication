@@ -8,7 +8,7 @@ import { createClient } from '@supabase/supabase-js';
 import * as tar from 'tar';
 import helmet from 'helmet';
 import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, performPush, planPull, lastKnownCommit } from './lib/push-core.js';
-import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, assertCanCreateRepo, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
+import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
 import { createGitRunner, withGitAuth, gitAuthEnv, checkGitCredentials } from './lib/git.js';
 
 const app = express();
@@ -58,8 +58,10 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
-// delete_repo lets a push remove the empty repository it created when the push then fails.
-const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo delete_repo offline_access';
+// Least privilege by default. Adding delete_repo (opt-in) lets a failed first push delete the empty
+// repository it created, at the cost of every stored token being able to delete the user's
+// repositories; see SECURITY.md.
+const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
 const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
 if (TRUST_PROXY !== undefined) app.set('trust proxy', TRUST_PROXY);
@@ -1219,9 +1221,9 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
             } catch (e) {
               if (e.status !== 404) throw e;
             }
-            assertCanCreateRepo(scopes);
             const repo = await github('https://api.github.com/user/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, private: visibility !== 'public', auto_init: false }) });
-            return { repo, created: true };
+            // Without delete_repo a failed first push leaves this repository in place, linked to the project.
+            return { repo, created: true, canCleanup: tokenCanDeleteRepos(scopes) !== false };
           },
           // Deletes only a repository that still has no branches, i.e. nothing ever landed in it.
           async deleteRepo(repo) {
@@ -1289,6 +1291,13 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
   } catch (e) {
     const { status, body } = errorResponse(e, { context: `Push for project ${projectId}`, fallback: 'Push failed because of a server error.' });
     if (e.details?.cleanup) body.error = `${body.error} ${e.details.cleanup}`;
+    // A repository this push created and left in place is linked to the project, so it shows up
+    // and the next push fills it instead of creating another one.
+    const kept = e.details?.createdRepo;
+    if (project && kept) {
+      await updateProject(projectId, a.user.id, { repoId: kept.id, repoFullName: kept.full_name, repoUrl: kept.html_url, remoteUrl: kept.clone_url, branch })
+        .catch(err => console.error(`Push ${projectId}: could not link created repository: ${err.message}`));
+    }
     if (project) {
       await updateProject(projectId, a.user.id, { syncState: e.code === 'CONFLICT' ? 'conflict' : 'error', syncMessage: body.error })
         .catch(err => console.error(`Push ${projectId}: could not record failure: ${err.message}`));

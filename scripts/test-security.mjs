@@ -5,10 +5,11 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'http';
 import crypto from 'crypto';
+import fs from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, errorResponse, AppError, envInt, assertCanCreateRepo } from '../lib/security.js';
+import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, errorResponse, AppError, envInt, tokenCanDeleteRepos } from '../lib/security.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -76,11 +77,18 @@ test('unexpected errors are replaced by a generic message with a reference id', 
   assert.deepEqual(known, { status: 409, body: { error: 'Pick a side.', code: 'CONFLICT' } });
 });
 
-test('a new repository is only created when the token can delete it again', () => {
-  assert.doesNotThrow(() => assertCanCreateRepo('repo, delete_repo'));
-  assert.doesNotThrow(() => assertCanCreateRepo(null), 'GitHub App tokens send no scope header');
-  for (const scopes of ['repo', 'repo, offline_access', '', 'delete_repos']) {
-    assert.throws(() => assertCanCreateRepo(scopes), e => e.code === 'MISSING_SCOPE' && e.status === 403 && /Nothing was created/.test(e.message));
+test('delete_repo is read from the scope header, and unknown is not treated as granted or refused', () => {
+  assert.equal(tokenCanDeleteRepos('repo, delete_repo'), true);
+  for (const scopes of ['repo', 'repo, offline_access', '', 'delete_repos']) assert.equal(tokenCanDeleteRepos(scopes), false);
+  assert.equal(tokenCanDeleteRepos(null), null, 'GitHub App tokens send no scope header');
+});
+
+test('the default OAuth scope does not include delete_repo', async () => {
+  const source = await fs.readFile(path.join(ROOT, 'server.js'), 'utf8');
+  const fallback = source.match(/GITHUB_OAUTH_SCOPE \|\| '([^']*)'/)[1];
+  assert.equal(fallback, 'repo offline_access');
+  for (const file of ['render.yaml', '.env.example']) {
+    assert.doesNotMatch(await fs.readFile(path.join(ROOT, file), 'utf8'), /^\s*(value: |GITHUB_OAUTH_SCOPE=).*delete_repo/m, file);
   }
 });
 

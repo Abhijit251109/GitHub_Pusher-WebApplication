@@ -226,6 +226,18 @@ test('when the cleanup itself fails the user is told the repository exists', asy
   await assert.rejects(push({ id: 'p' }, { deps }), e => /could not be deleted automatically/.test(e.details.cleanup));
 });
 
+test('without delete_repo a failed first push keeps the created repository, announced and linked', async () => {
+  const remote = await bareRepo();
+  const { deps, calls } = pushDeps({ remote, files: { 'a.txt': 'a' }, overrides: {
+    gitFor: failingOn('push'),
+    async resolveRepo() { calls.resolveRepo++; return { repo: { id: 7, clone_url: remote, full_name: 'me/repo', html_url: 'https://github.test/me/repo', default_branch: 'main' }, created: true, canCleanup: false }; }
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'PUSH_FAILED'
+    && /still empty/.test(e.details.cleanup) && /https:\/\/github\.test\/me\/repo/.test(e.details.cleanup)
+    && e.details.createdRepo.full_name === 'me/repo' && e.details.createdRepo.id === 7);
+  assert.equal(calls.deleteRepo, 0, 'no delete is attempted without the scope');
+});
+
 test('a remote tree count mismatch fails verification', async () => {
   const remote = await bareRepo();
   const { deps } = pushDeps({ remote, files: { 'a.txt': 'a' }, overrides: { remoteTreeCount: async () => ({ count: 0, truncated: false }) } });
