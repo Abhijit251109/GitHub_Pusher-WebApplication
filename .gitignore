@@ -18,6 +18,7 @@ release/
 *.env.production
 *.env.backup
 
-#script and prompts
+#script and prompts and lavish
+.lavish
 orchestrate.sh
 qa-prompts.md
