@@ -9,7 +9,7 @@ import fs from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, errorResponse, AppError, envInt, tokenCanDeleteRepos } from '../lib/security.js';
+import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, jobSlot, runJob, errorResponse, AppError, envInt, tokenCanDeleteRepos } from '../lib/security.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -92,6 +92,20 @@ test('the default OAuth scope does not include delete_repo', async () => {
   }
 });
 
+test('a job slot is free by the time its response is written, even if the handler then keeps running', async () => {
+  const gate = createJobGate({ maxConcurrent: 1, maxPerUser: 1 });
+  const req = { auth: { user: { id: 'u' } } };
+  const res = { on() {}, status() { return this; }, setHeader() {}, json() {}, end() { res.freeWhenSent = gate.running === 0; } };
+  await new Promise(resolve => jobSlot(gate)(req, res, resolve));
+  assert.equal(gate.running, 1);
+  let finish;
+  const handlerDone = runJob(async (_req, r) => { r.end(); await new Promise(f => { finish = f; }); })(req, res);
+  assert.equal(res.freeWhenSent, true, 'released before the response went out');
+  assert.equal(gate.tryAcquire('u').ok, true, 'the same user can start the next job at once');
+  finish();
+  await handlerDone;
+});
+
 test('integer settings: unset uses the default, anything not a whole number in range is refused', () => {
   assert.equal(envInt({}, 'X', 7), 7);
   assert.equal(envInt({ X: '' }, 'X', 7), 7);
@@ -135,7 +149,9 @@ users.u7 = { token: 'token-u7', id: '1007', projectId: null };
 users.u8 = { token: 'token-u8', id: '1008', projectId: null };
 // u9 checks that uploads keep folder paths and never lose files silently.
 users.u9 = { token: 'token-u9', id: '1009', projectId: null };
-for (const u of [users.u7, users.u8, users.u9]) byHash.set(tokenHash(u.token), u);
+// u10 sends uploads back to back.
+users.u10 = { token: 'token-u10', id: '1010', projectId: null };
+for (const u of [users.u7, users.u8, users.u9, users.u10]) byHash.set(tokenHash(u.token), u);
 
 async function storageRoute(req, res, rest, body, send) {
   const BUCKET = 'gpp-private/';
@@ -223,7 +239,7 @@ before(async () => {
       SESSION_SECRET, TOKEN_ENCRYPTION_KEY: ENC_KEY_HEX,
       FRONTEND_URL: 'https://owner.github.io/app', PUBLIC_BASE_URL: base, TRUST_PROXY: '1',
       GITHUB_CLIENT_ID: 'id', GITHUB_CLIENT_SECRET: 'secret',
-      RATE_LIMIT_AUTH_PER_15_MIN: '5', RATE_LIMIT_PUSH_PER_15_MIN: '10', MAX_CONCURRENT_JOBS: '2', SYNC_INTERVAL_MS: '3600000'
+      RATE_LIMIT_AUTH_PER_15_MIN: '5', RATE_LIMIT_PUSH_PER_15_MIN: '10', RATE_LIMIT_UPLOAD_PER_15_MIN: '200', MAX_CONCURRENT_JOBS: '2', SYNC_INTERVAL_MS: '3600000'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -436,4 +452,25 @@ test('e2e: an upload missing a selected file, or with a duplicate path, stores n
 
   assert.equal(store.size, before, 'no Storage objects were written');
   assert.equal(projectRows.size, rowsBefore, 'no project was created');
+});
+
+test('e2e: back-to-back uploads by one user are never refused as JOB_IN_PROGRESS', async () => {
+  const statuses = [];
+  for (let i = 0; i < 25; i++) {
+    for (let j = 0; j < 2; j++) {
+      const res = await upload(users.u10, uploadForm(`b2b-${i}-${j}`, { [`b2b/${i}-${j}.txt`]: 'x' }));
+      statuses.push(res.status);
+      await res.arrayBuffer();
+    }
+  }
+  assert.deepEqual(statuses.filter(s => s !== 200), [], 'every upload succeeded');
+});
+
+test('e2e: a path uploaded both as a file and as a folder is refused', async () => {
+  const before = store.size;
+  const res = await upload(users.u9, uploadForm('conflict', { 'x/a': 'file', 'x/a/b': 'inside' }));
+  const body = await res.json();
+  assert.equal(res.status, 422, JSON.stringify(body));
+  assert.equal(body.code, 'PATH_CONFLICT');
+  assert.equal(store.size, before);
 });

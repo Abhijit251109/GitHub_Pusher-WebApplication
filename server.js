@@ -1007,6 +1007,11 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
 }, requireUser, uploadLimit, heavyJob, upload.array('files', MAX_FILES), runJob(async (req, res) => {
   const a = req.auth;
   let workspace = null;
+  // Runs before the response is sent, so the job (and its slot) is fully over when the client hears back.
+  const removeUploadTemp = async () => {
+    for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
+    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
+  };
   try {
     const files = req.files || [];
     if (!files.length) throw new AppError('NO_FILES', 'Choose at least one file.');
@@ -1026,6 +1031,14 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
       if (!target || !target.startsWith(root + path.sep)) { invalid.push(String(file.originalname)); continue; }
       if (placed.has(rel)) throw new AppError('DUPLICATE_PATH', `Two uploaded files have the same path "${rel}". Nothing was stored.`, { status: 422 });
       placed.set(rel, Number(file.size || 0));
+    }
+    // A path cannot be both a file and a folder (x/a and x/a/b); one of the two would be lost.
+    for (const rel of placed.keys()) {
+      const parts = rel.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join('/');
+        if (placed.has(dir)) throw new AppError('PATH_CONFLICT', `"${dir}" is uploaded both as a file and as a folder containing "${rel}". Nothing was stored.`, { status: 422 });
+      }
     }
     if (invalid.length) {
       throw new AppError('INVALID_PATH', `${invalid.length} file(s) have names that cannot be stored safely. Nothing was stored.`, { status: 422, details: { files: invalid.slice(0, 20) } });
@@ -1083,9 +1096,11 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
         throw e;
       }
     });
+    await removeUploadTemp();
     broadcast(a.user.id, { type: 'projects-changed', projectId: id });
     res.json({ ...project, files: project.fileCount });
   } catch (e) {
+    await removeUploadTemp();
     // If the database is missing the change tracking columns, give a clear message
     if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
       console.error('Add project failed: missing database columns. Run supabase/schema.sql to add them.');
@@ -1093,9 +1108,6 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     } else {
       sendError(res, e, 'Add project', 'The project could not be added.');
     }
-  } finally {
-    for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
-    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
   }
 }));
 app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
