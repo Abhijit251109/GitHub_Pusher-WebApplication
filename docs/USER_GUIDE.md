@@ -4,6 +4,10 @@
 
 Use **Add Project** and select a project directory. The project is copied into the account's persistent library.
 
+Every selected file must arrive at its own path. The browser sends the list of files it selected, and the server compares it with what it received. If any file is missing, has the wrong size, has an unsafe name, or shares its path with another file, nothing is stored and the error lists the files. Some phone browsers drop the folder structure when you pick a folder; the app detects this and refuses the upload rather than mixing files from different subfolders.
+
+Projects added before this check existed were stored with every file at the top level, and files with the same name in different folders overwrote each other. Remove those projects and add them again.
+
 ## Remove a project
 
 Select the project and choose **Remove**. Removing it from the library does not delete the corresponding GitHub repository.
@@ -25,7 +29,11 @@ Push safety rules:
 - Pushes never force-overwrite GitHub. Your commit is built on top of the branch's current history. If someone else pushes while yours is running, the push stops and asks you to try again.
 - Files changed on GitHub that you did not change are kept. If the same file changed in both places, the push stops and lists the files. You then choose to overwrite them with your versions or cancel.
 - A push only reports success after GitHub shows the new commit with the expected number of files. If nothing changed, it says so instead of making an empty commit.
-- If a push into a repository it just created fails, the app deletes that repository, but only after confirming on GitHub that nothing landed in it. Deleting needs the `delete_repo` scope in `GITHUB_OAUTH_SCOPE`. If the push was cut off by a timeout, or the repository can't be deleted, the error message links to the repository so you can check it.
+- Before a new repository is created, the app proves git can use your GitHub login and stages your files locally, so problems found on the server never leave a repository behind.
+- If a push into a repository it just created still fails, what happens depends on whether the server operator enabled the `delete_repo` permission (off by default):
+  - Without it, the repository stays. The error names it and links to it, and it is linked to the project, so pushing again fills that same repository instead of creating another. Delete it on GitHub if you don't want it.
+  - With it, the app deletes the repository, but only after confirming on GitHub that nothing landed in it.
+  - If the push was cut off by a timeout, nothing is deleted; the error links to the repository so you can check it.
 
 ## Automatic pull
 

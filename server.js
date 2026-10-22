@@ -8,8 +8,8 @@ import { createClient } from '@supabase/supabase-js';
 import * as tar from 'tar';
 import helmet from 'helmet';
 import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, performPush, planPull, lastKnownCommit } from './lib/push-core.js';
-import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
-import { createGitRunner } from './lib/git.js';
+import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
+import { createGitRunner, withGitAuth, gitAuthEnv, checkGitCredentials } from './lib/git.js';
 
 const app = express();
 const env = (name, fallback, range) => envInt(process.env, name, fallback, range);
@@ -58,6 +58,9 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
+// Least privilege by default. Adding delete_repo (opt-in) lets a failed first push delete the empty
+// repository it created, at the cost of every stored token being able to delete the user's
+// repositories; see SECURITY.md.
 const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
 
 const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
@@ -92,7 +95,10 @@ const upload = multer({
     destination: (_req, _file, cb) => cb(null, UPLOAD_TEMP),
     filename: (_req, file, cb) => cb(null, `${crypto.randomUUID()}-${normalizeName(path.basename(file.originalname || 'file'))}`)
   }),
-  limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE }
+  // Without preservePath busboy cuts every name down to its basename, which put all files at the
+  // project root and let same-named files in different folders overwrite each other.
+  preservePath: true,
+  limits: { files: MAX_FILES, fileSize: MAX_FILE_SIZE, fieldSize: 16 * 1024 * 1024 }
 });
 
 app.use((req, res, next) => {
@@ -671,7 +677,8 @@ function githubHeaders(token) {
 }
 // Every call times out after GITHUB_TIMEOUT_MS. Idempotent GETs are retried twice on network
 // errors, timeouts and 5xx; writes (POST/DELETE) are never retried.
-async function githubFetch(url, options = {}) {
+// `onResponse` receives the successful Response, for callers that need its headers.
+async function githubFetch(url, { onResponse, ...options } = {}) {
   const retries = (options.method || 'GET').toUpperCase() === 'GET' ? 2 : 0;
   for (let attempt = 0; ; attempt++) {
     let r;
@@ -686,6 +693,7 @@ async function githubFetch(url, options = {}) {
     const text = await r.text();
     let data; try { data = text ? JSON.parse(text) : null; } catch { data = text; }
     if (!r.ok) throw githubError(r, data);
+    onResponse?.(r);
     return data;
   }
 }
@@ -756,6 +764,23 @@ const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_UPLO
 const heavyJob = jobSlot(JOB_GATE);
 app.use('/api', apiLimit);
 
+// The browser's list of what it is sending ({path, size}[]), so files lost on the way are noticed.
+// Optional so that an older cached frontend can still upload.
+function parseUploadManifest(raw) {
+  if (raw === undefined || raw === '') return null;
+  let list;
+  try { list = JSON.parse(String(raw)); } catch { list = null; }
+  if (!Array.isArray(list) || list.length > MAX_FILES) throw new AppError('INVALID_INPUT', 'The upload file list is not valid.');
+  const out = new Map();
+  for (const entry of list) {
+    const rel = safeRelative(entry?.path);
+    if (!rel || !Number.isSafeInteger(entry.size) || entry.size < 0) throw new AppError('INVALID_INPUT', 'The upload file list is not valid.');
+    if (out.has(rel)) throw new AppError('DUPLICATE_PATH', `Two selected files have the same path "${rel}". Nothing was stored.`, { status: 422 });
+    out.set(rel, entry.size);
+  }
+  return out;
+}
+
 async function sanitizeGitRepository(dir) {
   const gitPath = path.join(dir, '.git');
   let stat;
@@ -781,13 +806,6 @@ async function ensureGit(dir, cloneUrl) {
     catch { await runGit(dir, ['remote', 'add', 'origin', cloneUrl]); }
   }
   return initialized;
-}
-function askpassScript() { return path.join(os.tmpdir(), `gpp-askpass-${crypto.randomUUID()}.cjs`); }
-async function withGitAuth(token, fn) {
-  const file = askpassScript();
-  await fs.writeFile(file, `const p=process.argv.slice(2).join(' ');process.stdout.write(/username/i.test(p)?'x-access-token':(process.env.GH_TOKEN||''));\n`);
-  try { await fs.chmod(file, 0o700); return await fn({ GIT_ASKPASS: file, GH_TOKEN: token, GIT_TERMINAL_PROMPT: '0' }); }
-  finally { await fs.rm(file, { force: true }); }
 }
 const runGit = createGitRunner({ timeoutMs: GIT_TIMEOUT_MS, jobTimeoutMs: JOB_TIMEOUT_MS });
 
@@ -989,26 +1007,53 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
 }, requireUser, uploadLimit, heavyJob, upload.array('files', MAX_FILES), runJob(async (req, res) => {
   const a = req.auth;
   let workspace = null;
+  // Runs before the response is sent, so the job (and its slot) is fully over when the client hears back.
+  const removeUploadTemp = async () => {
+    for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
+    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
+  };
   try {
     const files = req.files || [];
     if (!files.length) throw new AppError('NO_FILES', 'Choose at least one file.');
+    const expected = parseUploadManifest(req.body.manifest);
+    // Every file must land at its own relative path: a bad path or a second file with the same
+    // path fails the upload instead of being skipped or silently overwriting the first.
     let total = 0;
-    let skipped = 0;
+    const invalid = [];
+    const placed = new Map();
     workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-upload-'));
+    const root = path.resolve(workspace);
     for (const file of files) {
       total += Number(file.size || 0);
       if (total > MAX_TOTAL_UPLOAD) throw new AppError('UPLOAD_TOO_LARGE', `Upload exceeds ${Math.round(MAX_TOTAL_UPLOAD / 1024 / 1024)} MB.`, { status: 413 });
       const rel = safeRelative(file.originalname);
-      if (!rel) { skipped++; console.warn(`Skipped file with invalid path: "${file.originalname}" (size: ${file.size} bytes)`); continue; }
-      const target = path.join(workspace, rel);
-      // On Windows, path.join converts forward slashes to backslashes, so check both separators
-      const normalizedTarget = path.resolve(target);
-      const normalizedWorkspace = path.resolve(workspace);
-      if (normalizedTarget !== normalizedWorkspace && !normalizedTarget.startsWith(normalizedWorkspace + path.sep)) {
-        skipped++;
-        console.warn(`Skipped file with unsafe path: "${file.originalname}" (resolved: ${normalizedTarget}, workspace: ${normalizedWorkspace})`);
-        continue;
+      const target = rel ? path.resolve(root, rel) : null;
+      if (!target || !target.startsWith(root + path.sep)) { invalid.push(String(file.originalname)); continue; }
+      if (placed.has(rel)) throw new AppError('DUPLICATE_PATH', `Two uploaded files have the same path "${rel}". Nothing was stored.`, { status: 422 });
+      placed.set(rel, Number(file.size || 0));
+    }
+    // A path cannot be both a file and a folder (x/a and x/a/b); one of the two would be lost.
+    for (const rel of placed.keys()) {
+      const parts = rel.split('/');
+      for (let i = 1; i < parts.length; i++) {
+        const dir = parts.slice(0, i).join('/');
+        if (placed.has(dir)) throw new AppError('PATH_CONFLICT', `"${dir}" is uploaded both as a file and as a folder containing "${rel}". Nothing was stored.`, { status: 422 });
       }
+    }
+    if (invalid.length) {
+      throw new AppError('INVALID_PATH', `${invalid.length} file(s) have names that cannot be stored safely. Nothing was stored.`, { status: 422, details: { files: invalid.slice(0, 20) } });
+    }
+    if (expected) {
+      const missing = [...expected].filter(([rel, size]) => placed.get(rel) !== size).map(([rel]) => rel);
+      const unexpected = [...placed.keys()].filter(rel => !expected.has(rel));
+      if (missing.length || unexpected.length) {
+        throw new AppError('UPLOAD_INCOMPLETE', `Only ${expected.size - missing.length} of the ${expected.size} selected files arrived intact. Nothing was stored; try the upload again.`, {
+          status: 422, details: { expected: expected.size, received: placed.size, missing: missing.slice(0, 20), unexpected: unexpected.slice(0, 20) }
+        });
+      }
+    }
+    for (const file of files) {
+      const target = path.join(root, safeRelative(file.originalname));
       await fs.mkdir(path.dirname(target), { recursive: true });
       try {
         await fs.rename(file.path, target);
@@ -1019,7 +1064,6 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
         } else throw e;
       }
     }
-    if (skipped > 0) console.warn(`Upload skipped ${skipped} file(s) out of ${files.length} total.`);
     // Count all files including .git for display — matches what the user sees in their folder
     const uploadedCount = await countFiles(workspace, { includeGit: true, includeSkipped: true });
     // Count files excluding .git and skip dirs — what will actually be stored in the archive
@@ -1052,9 +1096,11 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
         throw e;
       }
     });
+    await removeUploadTemp();
     broadcast(a.user.id, { type: 'projects-changed', projectId: id });
     res.json({ ...project, files: project.fileCount });
   } catch (e) {
+    await removeUploadTemp();
     // If the database is missing the change tracking columns, give a clear message
     if (e.message && (e.message.includes('last_github_change_at') || e.message.includes('last_local_change_at'))) {
       console.error('Add project failed: missing database columns. Run supabase/schema.sql to add them.');
@@ -1062,9 +1108,6 @@ app.post('/api/projects', ensureRequestProtection, (req, res, next) => {
     } else {
       sendError(res, e, 'Add project', 'The project could not be added.');
     }
-  } finally {
-    for (const file of req.files || []) await fs.rm(file.path, { force: true }).catch(() => {});
-    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(() => {});
   }
 }));
 app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
@@ -1183,14 +1226,16 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
           async resolveRepo() {
             if (repoId) return { repo: await github(`https://api.github.com/repositories/${repoId}`), created: false };
             const name = normalizeName(repoName || project.name);
-            const login = (await github('https://api.github.com/user')).login;
+            let scopes = null;
+            const login = (await github('https://api.github.com/user', { onResponse: r => { scopes = r.headers.get('x-oauth-scopes'); } })).login;
             try {
               return { repo: await github(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`), created: false };
             } catch (e) {
               if (e.status !== 404) throw e;
             }
             const repo = await github('https://api.github.com/user/repos', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, private: visibility !== 'public', auto_init: false }) });
-            return { repo, created: true };
+            // Without delete_repo a failed first push leaves this repository in place, linked to the project.
+            return { repo, created: true, canCleanup: tokenCanDeleteRepos(scopes) !== false };
           },
           // Deletes only a repository that still has no branches, i.e. nothing ever landed in it.
           async deleteRepo(repo) {
@@ -1199,6 +1244,7 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
             await github(`https://api.github.com/repos/${repoPath(repo.full_name)}`, { method: 'DELETE' });
           },
           gitFor: (dir, fn) => withGitAuth(token, env => fn((args, opts) => runGit(dir, args, env, { ...opts, signal: deadline }))),
+          checkGitAuth: dir => withGitAuth(token, env => checkGitCredentials((cwd, args, e, opts) => runGit(cwd, args, e, { ...opts, signal: deadline }), dir, env, token)),
           async remoteTreeCount(repo, sha) {
             if (!/^[0-9a-f]{40,64}$/.test(sha)) throw new AppError('VERIFY_FAILED', 'Push finished but the commit id could not be verified.', { status: 502 });
             const tree = await github(`https://api.github.com/repos/${repoPath(repo.full_name)}/git/trees/${sha}?recursive=1`);
@@ -1257,6 +1303,13 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
   } catch (e) {
     const { status, body } = errorResponse(e, { context: `Push for project ${projectId}`, fallback: 'Push failed because of a server error.' });
     if (e.details?.cleanup) body.error = `${body.error} ${e.details.cleanup}`;
+    // A repository this push created and left in place is linked to the project, so it shows up
+    // and the next push fills it instead of creating another one.
+    const kept = e.details?.createdRepo;
+    if (project && kept) {
+      await updateProject(projectId, a.user.id, { repoId: kept.id, repoFullName: kept.full_name, repoUrl: kept.html_url, remoteUrl: kept.clone_url, branch })
+        .catch(err => console.error(`Push ${projectId}: could not link created repository: ${err.message}`));
+    }
     if (project) {
       await updateProject(projectId, a.user.id, { syncState: e.code === 'CONFLICT' ? 'conflict' : 'error', syncMessage: body.error })
         .catch(err => console.error(`Push ${projectId}: could not record failure: ${err.message}`));
@@ -1346,6 +1399,17 @@ async function syncAll() {
   }
 }
 
+let gitCheck = null;
+function gitCredentialsWork() {
+  gitCheck ??= (async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-gitcheck-'));
+    const token = crypto.randomBytes(8).toString('hex');
+    try { await checkGitCredentials(runGit, dir, gitAuthEnv(token), token); return true; }
+    catch (e) { console.error(`git credential self-check failed: ${e.internal || e.message}`); gitCheck = null; return false; }
+    finally { await fs.rm(dir, { recursive: true, force: true }); }
+  })();
+  return gitCheck;
+}
 app.get('/api/health', async (_req, res) => {
   let persistence = hasSupabase ? 'supabase-postgres-and-storage' : 'local-ephemeral';
   let datastore = 'not-configured';
@@ -1354,7 +1418,11 @@ app.get('/api/health', async (_req, res) => {
     datastore = error ? 'error' : 'ready';
     if (error && isProd) return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, error: 'Persistent datastore is unavailable.', code: 'DATASTORE_UNAVAILABLE' });
   }
-  res.json({ ok: true, app: APP_NAME, persistence, datastore, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS });
+  // Proves git can be handed a GitHub token on this host (no network); a failure here means every
+  // push would fail, so the health check fails too.
+  const git = await gitCredentialsWork() ? 'ready' : 'error';
+  if (git === 'error') return res.status(503).json({ ok: false, app: APP_NAME, persistence, datastore, git, error: 'git cannot authenticate to GitHub on this server.', code: 'GIT_AUTH_SETUP' });
+  res.json({ ok: true, app: APP_NAME, persistence, datastore, git, storageBucket: hasSupabase ? STORAGE_BUCKET : null, syncIntervalMs: SYNC_MS, maxArchiveMb: Math.round(MAX_ARCHIVE_SIZE / 1024 / 1024), maxSnapshots: MAX_SNAPSHOTS });
 });
 
 app.use((err, _req, res, next) => {

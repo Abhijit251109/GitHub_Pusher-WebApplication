@@ -42,6 +42,10 @@ Create or edit your GitHub OAuth App and set:
 - **Homepage URL:** your GitHub Pages URL
 - **Authorization callback URL:** your Render callback URL
 
+The app requests `repo offline_access` by default (`GITHUB_OAUTH_SCOPE`). Adding `delete_repo` is an opt-in trade-off described in [SECURITY.md](../SECURITY.md#github-scopes). If you deployed the previous default (`repo delete_repo offline_access`), set it back in Render's environment. Then have users revoke the app's access under GitHub **Settings → Applications → Authorized OAuth Apps** and sign in again: a token that was already granted `delete_repo` keeps it until it is revoked.
+
+`GET /api/health` also checks, without any network call, that git on the server can be handed a GitHub token (`"git": "ready"`). If it reports `error`, every push would fail, so the health check returns 503.
+
 GitHub's current OAuth documentation recommends the `state` parameter and PKCE (`S256`) for the web application flow. The backend implements both, and it exchanges the OAuth code server-side so the GitHub client secret never reaches the GitHub Pages frontend.
 
 ## 4. Lock the app to your own GitHub account

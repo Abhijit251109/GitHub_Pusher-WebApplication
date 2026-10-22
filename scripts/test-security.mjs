@@ -5,10 +5,11 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'http';
 import crypto from 'crypto';
+import fs from 'fs/promises';
 import path from 'path';
 import { spawn } from 'child_process';
 import { fileURLToPath } from 'url';
-import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, errorResponse, AppError, envInt } from '../lib/security.js';
+import { createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, createJobGate, jobSlot, runJob, errorResponse, AppError, envInt, tokenCanDeleteRepos } from '../lib/security.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -76,6 +77,35 @@ test('unexpected errors are replaced by a generic message with a reference id', 
   assert.deepEqual(known, { status: 409, body: { error: 'Pick a side.', code: 'CONFLICT' } });
 });
 
+test('delete_repo is read from the scope header, and unknown is not treated as granted or refused', () => {
+  assert.equal(tokenCanDeleteRepos('repo, delete_repo'), true);
+  for (const scopes of ['repo', 'repo, offline_access', '', 'delete_repos']) assert.equal(tokenCanDeleteRepos(scopes), false);
+  assert.equal(tokenCanDeleteRepos(null), null, 'GitHub App tokens send no scope header');
+});
+
+test('the default OAuth scope does not include delete_repo', async () => {
+  const source = await fs.readFile(path.join(ROOT, 'server.js'), 'utf8');
+  const fallback = source.match(/GITHUB_OAUTH_SCOPE \|\| '([^']*)'/)[1];
+  assert.equal(fallback, 'repo offline_access');
+  for (const file of ['render.yaml', '.env.example']) {
+    assert.doesNotMatch(await fs.readFile(path.join(ROOT, file), 'utf8'), /^\s*(value: |GITHUB_OAUTH_SCOPE=).*delete_repo/m, file);
+  }
+});
+
+test('a job slot is free by the time its response is written, even if the handler then keeps running', async () => {
+  const gate = createJobGate({ maxConcurrent: 1, maxPerUser: 1 });
+  const req = { auth: { user: { id: 'u' } } };
+  const res = { on() {}, status() { return this; }, setHeader() {}, json() {}, end() { res.freeWhenSent = gate.running === 0; } };
+  await new Promise(resolve => jobSlot(gate)(req, res, resolve));
+  assert.equal(gate.running, 1);
+  let finish;
+  const handlerDone = runJob(async (_req, r) => { r.end(); await new Promise(f => { finish = f; }); })(req, res);
+  assert.equal(res.freeWhenSent, true, 'released before the response went out');
+  assert.equal(gate.tryAcquire('u').ok, true, 'the same user can start the next job at once');
+  finish();
+  await handlerDone;
+});
+
 test('integer settings: unset uses the default, anything not a whole number in range is refused', () => {
   assert.equal(envInt({}, 'X', 7), 7);
   assert.equal(envInt({ X: '' }, 'X', 7), 7);
@@ -117,8 +147,11 @@ const projectRows = new Map(); // id -> row written by the server
 // u7 uploads and deletes a real project; u8 probes unknown project ids. Neither has seeded data.
 users.u7 = { token: 'token-u7', id: '1007', projectId: null };
 users.u8 = { token: 'token-u8', id: '1008', projectId: null };
-byHash.set(tokenHash(users.u7.token), users.u7);
-byHash.set(tokenHash(users.u8.token), users.u8);
+// u9 checks that uploads keep folder paths and never lose files silently.
+users.u9 = { token: 'token-u9', id: '1009', projectId: null };
+// u10 sends uploads back to back.
+users.u10 = { token: 'token-u10', id: '1010', projectId: null };
+for (const u of [users.u7, users.u8, users.u9, users.u10]) byHash.set(tokenHash(u.token), u);
 
 async function storageRoute(req, res, rest, body, send) {
   const BUCKET = 'gpp-private/';
@@ -206,7 +239,7 @@ before(async () => {
       SESSION_SECRET, TOKEN_ENCRYPTION_KEY: ENC_KEY_HEX,
       FRONTEND_URL: 'https://owner.github.io/app', PUBLIC_BASE_URL: base, TRUST_PROXY: '1',
       GITHUB_CLIENT_ID: 'id', GITHUB_CLIENT_SECRET: 'secret',
-      RATE_LIMIT_AUTH_PER_15_MIN: '5', RATE_LIMIT_PUSH_PER_15_MIN: '10', MAX_CONCURRENT_JOBS: '2', SYNC_INTERVAL_MS: '3600000'
+      RATE_LIMIT_AUTH_PER_15_MIN: '5', RATE_LIMIT_PUSH_PER_15_MIN: '10', RATE_LIMIT_UPLOAD_PER_15_MIN: '200', MAX_CONCURRENT_JOBS: '2', SYNC_INTERVAL_MS: '3600000'
     },
     stdio: ['ignore', 'pipe', 'pipe']
   });
@@ -378,4 +411,66 @@ test('e2e: the server refuses to start with a non-numeric limit', async () => {
     assert.notEqual(code, 0, `${name}=${value} should stop startup`);
     assert.match(output, new RegExp(`${name} must be a whole number`));
   }
+});
+
+function uploadForm(name, files, manifest) {
+  const form = new FormData();
+  form.append('projectName', name);
+  if (manifest) form.append('manifest', JSON.stringify(manifest));
+  for (const [rel, content] of Object.entries(files)) form.append('files', new Blob([content]), rel);
+  return form;
+}
+const upload = (user, form) => fetch(`${base}/api/projects`, { method: 'POST', headers: { Authorization: `Bearer ${user.token}` }, body: form });
+const storedPaths = (user, id) => Object.keys(JSON.parse(store.get(`projects/${user.id}/${id}/manifest.json`)).files).sort();
+
+test('e2e: an upload keeps every folder path, so same-named files in different folders all survive', async () => {
+  const files = { 'site/README.md': 'root', 'site/a/README.md': 'a', 'site/b/README.md': 'b', 'site/a/b/c.txt': 'c' };
+  const manifest = Object.entries(files).map(([path, content]) => ({ path, size: content.length }));
+  const res = await upload(users.u9, uploadForm('nested', files, manifest));
+  const project = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(project));
+  assert.equal(project.files, 4);
+  assert.deepEqual(storedPaths(users.u9, project.id), ['site/README.md', 'site/a/README.md', 'site/a/b/c.txt', 'site/b/README.md']);
+});
+
+test('e2e: an upload missing a selected file, or with a duplicate path, stores nothing', async () => {
+  const before = store.size;
+  const rowsBefore = projectRows.size;
+  const files = { 'p/a.txt': 'a', 'p/b.txt': 'b' };
+  const manifest = [{ path: 'p/a.txt', size: 1 }, { path: 'p/b.txt', size: 1 }, { path: 'p/lost.txt', size: 4 }];
+  const incomplete = await upload(users.u9, uploadForm('incomplete', files, manifest));
+  const body = await incomplete.json();
+  assert.equal(incomplete.status, 422);
+  assert.equal(body.code, 'UPLOAD_INCOMPLETE');
+  assert.deepEqual(body.details.missing, ['p/lost.txt']);
+
+  const form = uploadForm('dupes', files);
+  form.append('files', new Blob(['again']), 'p/a.txt');
+  const dup = await upload(users.u9, form);
+  assert.equal(dup.status, 422);
+  assert.equal((await dup.json()).code, 'DUPLICATE_PATH');
+
+  assert.equal(store.size, before, 'no Storage objects were written');
+  assert.equal(projectRows.size, rowsBefore, 'no project was created');
+});
+
+test('e2e: back-to-back uploads by one user are never refused as JOB_IN_PROGRESS', async () => {
+  const statuses = [];
+  for (let i = 0; i < 25; i++) {
+    for (let j = 0; j < 2; j++) {
+      const res = await upload(users.u10, uploadForm(`b2b-${i}-${j}`, { [`b2b/${i}-${j}.txt`]: 'x' }));
+      statuses.push(res.status);
+      await res.arrayBuffer();
+    }
+  }
+  assert.deepEqual(statuses.filter(s => s !== 200), [], 'every upload succeeded');
+});
+
+test('e2e: a path uploaded both as a file and as a folder is refused', async () => {
+  const before = store.size;
+  const res = await upload(users.u9, uploadForm('conflict', { 'x/a': 'file', 'x/a/b': 'inside' }));
+  const body = await res.json();
+  assert.equal(res.status, 422, JSON.stringify(body));
+  assert.equal(body.code, 'PATH_CONFLICT');
+  assert.equal(store.size, before);
 });
