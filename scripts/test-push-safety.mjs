@@ -31,7 +31,8 @@ async function prepareGit(dir, url) {
   await git(['init', '-q']);
   await git(['config', 'user.name', 'Test']);
   await git(['config', 'user.email', 'test@localhost']);
-  await git(['remote', 'add', 'origin', url]);
+  if (!url) return;
+  try { await git(['remote', 'add', 'origin', url]); } catch { await git(['remote', 'set-url', 'origin', url]); }
 }
 async function bareRepo() {
   const dir = await tmp('remote');
@@ -196,10 +197,21 @@ test('a branch that moves during the push is never overwritten', async () => {
   assert.deepEqual(await remoteFiles(remote), ['a.txt', 'c.txt']);
 });
 
+// Fails one git subcommand the way GitHub refusing it would.
+function failingOn(subcommand) {
+  return (dir, fn) => {
+    const git = gitIn(dir);
+    return fn(async (args, opts) => {
+      if (args[0] === subcommand) throw new PushError('PUSH_FAILED', 'denied', { status: 502 });
+      return git(args, opts);
+    });
+  };
+}
+
 test('a repository created for a push that fails is cleaned up', async () => {
   const remote = await bareRepo();
   const { deps, calls } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: {
-    gitFor: async () => { throw new PushError('PUSH_FAILED', 'denied', { status: 502 }); }
+    gitFor: failingOn('push')
   } });
   await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'PUSH_FAILED' && /deleted/.test(e.details.cleanup));
   assert.equal(calls.deleteRepo, 1);
@@ -208,7 +220,7 @@ test('a repository created for a push that fails is cleaned up', async () => {
 test('when the cleanup itself fails the user is told the repository exists', async () => {
   const remote = await bareRepo();
   const { deps } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: {
-    gitFor: async () => { throw new PushError('PUSH_FAILED', 'denied', { status: 502 }); },
+    gitFor: failingOn('push'),
     deleteRepo: async () => { throw new Error('Must have admin rights'); }
   } });
   await assert.rejects(push({ id: 'p' }, { deps }), e => /could not be deleted automatically/.test(e.details.cleanup));
@@ -413,4 +425,111 @@ test('a repository created for a push that timed out is never auto-deleted', asy
   const { deps, calls } = pushDeps({ remote, files: { 'a.txt': 'a' }, created: true, overrides: { gitFor: timingOutOn('push') } });
   await assert.rejects(push({ id: 'p' }, { deps }), e => e.code === 'GIT_TIMEOUT' && /interrupted/.test(e.details.cleanup));
   assert.equal(calls.deleteRepo, 0);
+});
+
+// --- GitHub credentials (the askpass helper that git could never run) ---
+
+test('git receives the token through gitAuthEnv', async () => {
+  const { createGitRunner, gitAuthEnv, checkGitCredentials } = await import('../lib/git.js');
+  const runGit = createGitRunner({ timeoutMs: 10_000, jobTimeoutMs: 10_000 });
+  const dir = await tmp('cred');
+  const { stdout } = await runGit(dir, ['credential', 'fill'], gitAuthEnv('tok-123'), { input: 'protocol=https\nhost=github.com\n\n' });
+  assert.match(stdout, /^username=x-access-token$/m);
+  assert.match(stdout, /^password=tok-123$/m);
+  await checkGitCredentials(runGit, dir, gitAuthEnv('tok-123'), 'tok-123');
+});
+
+test('a broken credential setup is reported as a server problem and stops before GitHub is touched', async () => {
+  const { createGitRunner, checkGitCredentials } = await import('../lib/git.js');
+  const runGit = createGitRunner({ timeoutMs: 10_000, jobTimeoutMs: 10_000 });
+  // The askpass file this replaced: JavaScript with no shebang, which git runs with /bin/sh.
+  const askpass = path.join(await tmp('askpass'), 'askpass.cjs');
+  await fs.writeFile(askpass, "const p=process.argv.slice(2).join(' ');process.stdout.write(/username/i.test(p)?'x-access-token':(process.env.GH_TOKEN||''));\n", { mode: 0o700 });
+  const broken = { GIT_ASKPASS: askpass, GH_TOKEN: 'tok', GIT_TERMINAL_PROMPT: '0' };
+  const error = await checkGitCredentials(runGit, await tmp('cred'), broken, 'tok').catch(e => e);
+  assert.equal(error.code, 'GIT_AUTH_SETUP');
+  assert.doesNotMatch(error.message, /Reconnect GitHub/);
+
+  const { deps, calls } = pushDeps({ remote: await bareRepo(), files: { 'a.txt': 'a' }, created: true, overrides: {
+    checkGitAuth: dir => checkGitCredentials(runGit, dir, broken, 'tok')
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), { code: 'GIT_AUTH_SETUP' });
+  assert.equal(calls.resolveRepo, 0, 'no repository was looked up or created');
+});
+
+test('files that cannot be committed are found before a repository is created', async () => {
+  const { deps, calls } = pushDeps({ remote: await bareRepo(), files: { 'a.txt': 'a' }, created: true, overrides: {
+    gitFor: (dir, fn) => {
+      const git = gitIn(dir);
+      return fn(async (args, opts) => {
+        if (args[0] === 'write-tree') throw new PushError('PUSH_FAILED', 'index broken', { status: 500 });
+        return git(args, opts);
+      });
+    }
+  } });
+  await assert.rejects(push({ id: 'p' }, { deps }), { code: 'PUSH_FAILED' });
+  assert.equal(calls.resolveRepo, 0);
+});
+
+// A smart-HTTP git server that, like GitHub, answers 401 until it gets Basic auth with the token.
+async function authenticatedGitServer(token) {
+  const http = await import('http');
+  const { spawn } = await import('child_process');
+  const root = await tmp('http-root');
+  await gitIn(root)(['init', '-q', '--bare', '-b', 'main', 'repo.git']);
+  const expected = 'Basic ' + Buffer.from(`x-access-token:${token}`).toString('base64');
+  const server = http.createServer((req, res) => {
+    if (req.headers.authorization !== expected) {
+      res.writeHead(401, { 'WWW-Authenticate': 'Basic realm="test"' });
+      return res.end();
+    }
+    const url = new URL(req.url, 'http://localhost');
+    const cgi = spawn('git', ['http-backend'], { env: {
+      ...GIT_ENV, GIT_PROJECT_ROOT: root, GIT_HTTP_EXPORT_ALL: '1', REMOTE_USER: 'x-access-token',
+      PATH_INFO: url.pathname, QUERY_STRING: url.search.slice(1), REQUEST_METHOD: req.method,
+      CONTENT_TYPE: req.headers['content-type'] || '', HTTP_CONTENT_ENCODING: req.headers['content-encoding'] || '',
+      GIT_PROTOCOL: req.headers['git-protocol'] || ''
+    } });
+    req.pipe(cgi.stdin);
+    let head = Buffer.alloc(0);
+    let headersDone = false;
+    cgi.stdout.on('data', chunk => {
+      if (headersDone) return res.write(chunk);
+      head = Buffer.concat([head, chunk]);
+      const end = head.indexOf('\r\n\r\n');
+      if (end < 0) return;
+      headersDone = true;
+      let status = 200;
+      for (const line of head.slice(0, end).toString().split('\r\n')) {
+        const [name, ...rest] = line.split(':');
+        if (name.toLowerCase() === 'status') status = parseInt(rest.join(':'), 10);
+        else res.setHeader(name, rest.join(':').trim());
+      }
+      res.writeHead(status);
+      res.write(head.slice(end + 4));
+    });
+    cgi.stdout.on('end', () => res.end());
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  return { url: `http://127.0.0.1:${server.address().port}/repo.git`, bare: path.join(root, 'repo.git'), close: () => server.close() };
+}
+
+test('a push authenticates to an HTTP remote with the token and lands every file', async () => {
+  const { createGitRunner, withGitAuth, checkGitCredentials } = await import('../lib/git.js');
+  const runGit = createGitRunner({ timeoutMs: 30_000, jobTimeoutMs: 60_000 });
+  const remote = await authenticatedGitServer('good-token');
+  try {
+    const authed = token => ({
+      gitFor: (dir, fn) => withGitAuth(token, env => fn((args, opts) => runGit(dir, args, env, opts))),
+      checkGitAuth: dir => withGitAuth(token, env => checkGitCredentials(runGit, dir, env, token))
+    });
+    const rejected = pushDeps({ remote: remote.url, files: { 'a.txt': 'a' }, created: true, overrides: authed('wrong-token') });
+    await assert.rejects(push({ id: 'p' }, rejected), e => e.code === 'FETCH_FAILED' && /denied access/.test(e.message) && /deleted/.test(e.details.cleanup));
+    assert.equal(rejected.calls.deleteRepo, 1, 'the empty repository created for the failed push is removed');
+
+    const files = { 'README.md': 'root', 'a/README.md': 'a', 'a/b/c.txt': 'c' };
+    const result = await push({ id: 'p' }, pushDeps({ remote: remote.url, files, created: true, overrides: authed('good-token') }));
+    assert.equal(result.outcome, 'pushed');
+    assert.deepEqual(await remoteFiles(remote.bare), ['README.md', 'a/README.md', 'a/b/c.txt']);
+  } finally { remote.close(); }
 });
