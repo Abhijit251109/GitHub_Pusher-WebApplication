@@ -8,8 +8,9 @@ import { createClient } from '@supabase/supabase-js';
 import * as tar from 'tar';
 import helmet from 'helmet';
 import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, performPush, planPull, lastKnownCommit } from './lib/push-core.js';
-import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
+import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseCommitMessage, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
 import { createGitRunner, withGitAuth, gitAuthEnv, checkGitCredentials } from './lib/git.js';
+import { parseEditorPath, listEditorDirectory, readEditorFile, parseFileEdit, writeEditorFile } from './lib/project-files.js';
 
 const app = express();
 const env = (name, fallback, range) => envInt(process.env, name, fallback, range);
@@ -46,7 +47,7 @@ const GIT_TIMEOUT_MS = env('GIT_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
 const JOB_TIMEOUT_MS = env('JOB_TIMEOUT_MS', 10 * 60 * 1000, { min: 1000 });
 const GITHUB_TIMEOUT_MS = 30 * 1000;
 const SUPABASE_TIMEOUT_MS = env('SUPABASE_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
-const APP_NAME = process.env.APP_NAME || 'GitHub Project Pusher';
+const APP_NAME = process.env.APP_NAME || 'GitHub Pusher Studio';
 const SESSION_COOKIE = 'gpp_session';
 const OAUTH_BINDING_COOKIE = 'gpp_oauth_pre';
 // Shared custom URI scheme for Android and Electron desktop OAuth handoff.
@@ -457,9 +458,23 @@ async function storageDownload(objectPath) {
 }
 async function storageList(prefix) {
   supabaseRequired();
-  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list(prefix, { limit: 1000 });
-  if (error) throw new Error(`Storage list failed for ${prefix}: ${error.message}`);
-  return (data || []).filter(entry => entry.id).map(entry => `${prefix}/${entry.name}`);
+  const files = [];
+  const folders = [prefix];
+  while (folders.length) {
+    const folder = folders.pop();
+    for (let offset = 0; ; offset += 1000) {
+      const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list(folder, { limit: 1000, offset, sortBy: { column: 'name', order: 'asc' } });
+      if (error) throw new Error(`Storage list failed for ${folder}: ${error.message}`);
+      for (const entry of data || []) {
+        if (!entry.name || entry.name === '.' || entry.name === '..' || entry.name.includes('/')) continue;
+        const full = `${folder}/${entry.name}`;
+        if (entry.id) files.push(full);
+        else if (entry.id === null) folders.push(full);
+      }
+      if (!data || data.length < 1000) break;
+    }
+  }
+  return files;
 }
 // Removes everything stored for a project: the known paths plus anything else under its
 // projects/ and snapshots/ folders. Returns the paths that could not be removed (already logged).
@@ -760,6 +775,7 @@ const authLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AUTH_P
 const exchangeLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AUTH_PER_15_MIN', 20) });
 const pushLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_PUSH_PER_15_MIN', 20), key: 'user' });
 const fetchLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_FETCH_PER_15_MIN', 30), key: 'user' });
+const editorLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_EDITOR_PER_15_MIN', 300), key: 'user' });
 const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_UPLOAD_PER_15_MIN', 10), key: 'user' });
 const heavyJob = jobSlot(JOB_GATE);
 app.use('/api', apiLimit);
@@ -839,7 +855,7 @@ const projectLocks = new Map();
 async function withProjectLock(projectId, fn) {
   const previous = projectLocks.get(projectId) || Promise.resolve();
   let current;
-  current = previous.then(fn).finally(() => {
+  current = previous.catch(() => {}).then(fn).finally(() => {
     if (projectLocks.get(projectId) === current) projectLocks.delete(projectId);
   });
   projectLocks.set(projectId, current);
@@ -1137,6 +1153,81 @@ app.get('/api/projects/:id/history', async (req, res) => {
   } catch (e) { sendError(res, e, 'Project history'); }
 });
 
+// Re-read ownership and the storage pointer under the same lock as saves/pulls/pushes.
+// A second tab or background pull must never silently replace a newer edit.
+async function withOwnedWorkspace(user, projectId, fn) {
+  return withProjectLock(projectId, async () => {
+    const project = await dbGetProject(projectId);
+    if (!project || String(project.userId) !== String(user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
+    return withWorkspace(project, dir => fn(project, dir));
+  });
+}
+
+app.get('/api/projects/:id/files', requireUser, editorLimit, heavyJob, runJob(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const id = parseProjectId(req.params.id);
+    const relative = parseEditorPath(req.query.path, { directory: true });
+    const listing = await withOwnedWorkspace(req.auth.user, id, (_project, dir) => listEditorDirectory(dir, relative));
+    res.json(listing);
+  } catch (e) { sendError(res, e, 'Browse project files'); }
+}));
+
+app.get('/api/projects/:id/file', requireUser, editorLimit, heavyJob, runJob(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const id = parseProjectId(req.params.id);
+    const relative = parseEditorPath(req.query.path);
+    const file = await withOwnedWorkspace(req.auth.user, id, (_project, dir) => readEditorFile(dir, relative));
+    res.json(file);
+  } catch (e) { sendError(res, e, 'Read project file'); }
+}));
+
+app.post('/api/projects/:id/file', ensureRequestProtection, requireUser, editorLimit, heavyJob, runJob(async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const id = parseProjectId(req.params.id);
+    const edit = parseFileEdit(req.body);
+    const result = await withOwnedWorkspace(req.auth.user, id, async (project, dir) => {
+      // Snapshot before changing the temporary workspace; a failed save keeps the stored copy.
+      const current = await readEditorFile(dir, edit.path);
+      if (current.sha !== edit.sha) throw new AppError('FILE_CHANGED', 'This file changed since you opened it. Copy your draft, then reopen the file to review the latest version.', { status: 409 });
+      if (current.content === edit.content) return { ...current, changed: false };
+      await snapshotProject(project, dir, 'before-editor-save');
+      const file = await writeEditorFile(dir, edit);
+      // Publish the new archive/manifest together by switching the row only after both verify.
+      // In particular, do not overwrite working.tgz if its companion upload might still fail.
+      const nextPath = `projects/${project.userId}/${id}/edits/${crypto.randomUUID()}/working.tgz`;
+      let stored;
+      let publishing = false;
+      try {
+        stored = await persistWorkingTree({ ...project, storagePath: nextPath }, dir);
+        publishing = true;
+        await dbUpsertProject({
+          ...project, storagePath: stored.storagePath, fileCount: stored.manifest.fileCount,
+          updatedAt: nowIso(), lastLocalChangeAt: nowIso(), syncState: 'local',
+          syncMessage: 'Editor changes saved to the project workspace. Push Selected to publish them to GitHub.'
+        });
+      } catch (e) {
+        // A lost database acknowledgement may still mean the pointer was switched. Only
+        // delete staged bytes when we know the row is not using them.
+        const recorded = publishing ? await dbGetProject(id).catch(() => null) : project;
+        if (recorded && recorded.storagePath !== nextPath) {
+          await supabase.storage.from(STORAGE_BUCKET).remove([nextPath, manifestPathFor(nextPath)]).catch(() => {});
+        }
+        throw e;
+      }
+      if (project.storagePath) {
+        const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([project.storagePath, manifestPathFor(project.storagePath)]).catch(error => ({ error }));
+        if (error) console.warn(`Editor ${id}: superseded workspace cleanup failed.`);
+      }
+      return file;
+    });
+    if (result.changed) broadcast(req.auth.user.id, { type: 'project-updated', projectId: id, reason: 'editor-save' });
+    res.json(result);
+  } catch (e) { sendError(res, e, 'Save project file', 'Your changes could not be saved. Keep your draft and try again.'); }
+}));
+
 app.get('/api/github/repos', async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   try {
@@ -1175,6 +1266,7 @@ async function parsePushRequest(body = {}) {
     repoId: parseRepoId(body.repoId),
     repoName: parseOptionalString(body.repoName, 'Repository name', { max: 100 }),
     visibility: parseEnum(body.visibility, 'Visibility', ['private', 'public'], 'private'),
+    commitMessage: parseCommitMessage(body.commitMessage),
     branch: parseBranch(body.branch),
     conflictResolution: parseEnum(body.conflictResolution, 'Conflict resolution', ['keep-local'], null)
   };
@@ -1200,7 +1292,7 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
   try {
     input = await parsePushRequest(req.body);
   } catch (e) { return sendError(res, e, 'Push request'); }
-  const { projectId, repoId, repoName, visibility, branch, conflictResolution } = input;
+  const { projectId, repoId, repoName, visibility, branch, conflictResolution, commitMessage } = input;
   let project;
   try {
     project = await dbGetProject(projectId);
@@ -1210,14 +1302,19 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
     const token = await userToken(a.user);
     if (!token) throw new PushError('GITHUB_NOT_CONNECTED', 'Connect GitHub before pushing.', { status: 401 });
     const github = (url, options = {}) => githubFetch(url, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } });
-    const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
+    const cancellation = new AbortController();
+    res.on('close', () => { if (!res.writableEnded) cancellation.abort(); });
+    if (res.destroyed) cancellation.abort();
+    const deadline = AbortSignal.any([AbortSignal.timeout(JOB_TIMEOUT_MS), cancellation.signal]);
     let result;
     await withProjectLock(project.id, async () => {
+      project = await dbGetProject(projectId);
+      if (!project || String(project.userId) !== String(a.user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
       result = await performPush({
         project,
         branch,
         keepLocalOnConflict: conflictResolution === 'keep-local',
-        message: `Sync from ${APP_NAME} ${nowIso()}`,
+        message: commitMessage ?? `Sync from ${APP_NAME} ${nowIso()}`,
         deps: {
           withWorkspace,
           prepareGit: ensureGit,
@@ -1320,13 +1417,14 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
 
 async function syncProjectForUser(user, project) {
   if (!project.repoFullName) return;
-  const branch = project.branch || 'main';
-  if (branch !== project.branch) {
-    // Auto-set branch to main if missing and persist to DB
-    await updateProject(project.id, user.id, { branch }).catch(e => console.warn(`Failed to set default branch: ${e.message}`));
-    project.branch = branch;
-  }
   await withProjectLock(project.id, async () => {
+    project = await dbGetProject(project.id);
+    if (!project || String(project.userId) !== String(user.id)) return;
+    const branch = project.branch || 'main';
+    if (branch !== project.branch) {
+      await updateProject(project.id, user.id, { branch }).catch(e => console.warn(`Failed to set default branch: ${e.message}`));
+      project.branch = branch;
+    }
     const token = await userToken(user);
     if (!token) return;
     try {

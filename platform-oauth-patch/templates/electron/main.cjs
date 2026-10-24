@@ -125,7 +125,7 @@ if (!hasSingleInstanceLock) {
     });
     mainWindow.webContents.on('did-finish-load', openPendingOAuthCallback);
     mainWindow.on('closed', () => { mainWindow = null; });
-    mainWindow.loadURL(APP_URL).catch(error => console.error('Could not load GitHub Project Pusher:', error.message));
+    mainWindow.loadURL(APP_URL).catch(error => console.error('Could not load GitHub Pusher Studio:', error.message));
   }
 
   app.whenReady().then(() => {

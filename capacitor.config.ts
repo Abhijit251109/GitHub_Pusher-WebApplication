@@ -5,7 +5,7 @@ const appUrl = process.env.GPP_APP_URL || process.env.PUBLIC_BASE_URL || 'https:
 
 const config: CapacitorConfig = {
   appId: 'com.githubprojectpusher.app',
-  appName: 'GitHub Project Pusher',
+  appName: 'GitHub Pusher Studio',
   webDir: 'public',
   server: {
     url: appUrl,

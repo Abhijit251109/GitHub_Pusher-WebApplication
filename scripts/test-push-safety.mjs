@@ -545,3 +545,16 @@ test('a push authenticates to an HTTP remote with the token and lands every file
     assert.deepEqual(await remoteFiles(remote.bare), ['README.md', 'a/README.md', 'a/b/c.txt']);
   } finally { remote.close(); }
 });
+
+test('custom commit messages reach Git unchanged and an unchanged workspace creates no commit', async () => {
+  const remote = await bareRepo();
+  const { deps } = pushDeps({ remote, files: { 'src/app.js': 'hello' } });
+  const message = '  Improve editor navigation\n\nKeep nested files. नमस्ते  ';
+  const first = await push({ id: 'custom-message' }, { deps }, { message });
+  const commit = (await gitIn(remote)(['cat-file', '-p', first.commit])).stdout;
+  assert.equal(commit.slice(commit.indexOf('\n\n') + 2), message + '\n');
+  const second = await push({ id: 'custom-message', lastPushedCommit: first.commit, lastPushedAt: new Date().toISOString() }, { deps }, { message: 'No new commit for identical files' });
+  assert.equal(second.outcome, 'no-changes');
+  assert.equal(second.commit, first.commit);
+  assert.equal((await gitIn(remote)(['rev-list', '--count', 'main'])).stdout.trim(), '1');
+});

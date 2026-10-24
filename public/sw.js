@@ -1,7 +1,7 @@
-const CACHE = 'gpp-shell-v7';
+const CACHE = 'gpp-shell-v8';
 const base = new URL('./', self.registration.scope);
 const asset = name => new URL(name, base).toString();
-const ASSETS = ['index.html','login.html','manifest.webmanifest','config.js','app.js','login.js','theme.js','feedback.js','styles.css','login.css','icons/icon.svg','icons/icon-192.png','icons/icon-512.png'].map(asset);
+const ASSETS = ['index.html','login.html','manifest.webmanifest','config.js','app.js','editor.js','login.js','theme.js','feedback.js','styles.css','login.css','icons/icon.svg','icons/icon-192.png','icons/icon-512.png'].map(asset);
 self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting())));
 self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('gpp-shell-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
 self.addEventListener('fetch', event => {

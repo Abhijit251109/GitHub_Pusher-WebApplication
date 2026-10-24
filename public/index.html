@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
   <meta name="theme-color" content="#111827" />
-  <meta name="description" content="Persistent GitHub project library and live sync dashboard." />
+  <meta name="description" content="Browse files, edit code, fetch changes and push projects with GitHub Pusher Studio." />
   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.onrender.com https://*.github.io http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com; worker-src 'self'">
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -13,15 +13,15 @@
   <link rel="icon" href="icons/icon.svg" />
   <link rel="stylesheet" href="styles.css" />
   <script src="theme.js"></script>
-  <title>GitHub Project Pusher</title>
+  <title>GitHub Pusher Studio</title>
 </head>
 <body>
   <header class="topbar">
-    <a class="brand-lockup" href="./" aria-label="GitHub Project Pusher home">
+    <a class="brand-lockup" href="./" aria-label="GitHub Pusher Studio home">
       <span class="brand-mark" aria-hidden="true">⌁</span>
       <span>
-        <span class="brand">GitHub Project Pusher</span>
-        <span class="sub">Project library · GitHub sync · installable app</span>
+        <span class="brand">GitHub Pusher Studio</span>
+        <span class="sub">Browse · Edit · Sync · Push</span>
       </span>
     </a>
     <div class="top-actions">
@@ -67,8 +67,8 @@
       <div class="workspace-heading">
         <div>
           <span class="eyebrow">YOUR WORKSPACE</span>
-          <h1>Projects, in sync.</h1>
-          <p>Manage your project library and keep every push safe.</p>
+          <h1>Your code. Your workspace.</h1>
+          <p>Open your projects, edit files, and publish changes when you are ready.</p>
         </div>
         <span class="workspace-badge">
           <span class="dot" aria-hidden="true"></span>Cloud workspace
@@ -79,6 +79,7 @@
       <div class="toolbar card">
         <div class="toolbar-left">
           <button id="addBtn" class="primary">＋ Add Project</button>
+          <button id="openBtn" class="secondary" disabled>⌘ Open Selected</button>
           <button id="pushBtn" class="secondary" disabled>↥ Push Selected</button>
           <button id="fetchBtn" class="secondary" disabled>⇩ Fetch Changes</button>
           <button id="removeBtn" class="danger" disabled>Remove</button>
@@ -109,6 +110,42 @@
           <div id="details" hidden></div>
         </aside>
       </div>
+
+      <section id="workspaceEditor" class="card studio" aria-labelledby="editorHeading" hidden>
+        <div class="section-head studio-heading">
+          <div>
+            <span class="eyebrow">PUSHER STUDIO</span>
+            <h2 id="editorHeading">Project editor</h2>
+            <p id="editorProjectName"></p>
+          </div>
+          <div class="studio-actions">
+            <button id="editorReload" class="ghost" type="button">Reload files</button>
+            <button id="editorClose" class="ghost" type="button">Close editor</button>
+          </div>
+        </div>
+        <p class="studio-note">Save to your app workspace, fetch the latest GitHub changes, then Push Selected when ready. The folder originally uploaded from your device is unchanged.</p>
+        <div class="studio-grid">
+          <nav class="file-explorer" aria-label="Project files">
+            <div class="explorer-location">
+              <button id="folderUp" class="ghost" type="button" aria-label="Parent folder" disabled>↑</button>
+              <button id="folderRoot" class="ghost" type="button">Root</button>
+              <span id="folderPath" class="file-path">/</span>
+            </div>
+            <div id="fileList" class="file-list" aria-live="polite"></div>
+          </nav>
+          <div class="code-pane">
+            <div class="code-toolbar">
+              <span id="editorFileName" class="file-path">Select a file</span>
+              <span id="editorDirty" class="state" hidden>Unsaved</span>
+              <button id="editorSave" class="primary" type="button" disabled>Save file</button>
+            </div>
+            <p id="editorStatus" class="editor-status" role="status">Open a text file to start editing. Binary files and files over 2 MiB are kept unchanged.</p>
+            <label class="sr-only" for="codeEditor">File contents</label>
+            <textarea id="codeEditor" class="code-editor" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="editorStatus" hidden></textarea>
+            <div class="editor-footer"><span id="editorPosition">UTF-8</span><span>Ctrl / ⌘ + S to save</span></div>
+          </div>
+        </div>
+      </section>
 
       <!-- Snapshots -->
       <section class="card snapshots">
@@ -165,7 +202,7 @@
       </div>
       <div id="addCount" class="muted">0 files selected</div>
       <div class="dialog-actions">
-        <button class="ghost" value="cancel">Cancel</button>
+        <button id="cancelAdd" class="ghost" type="button">Cancel</button>
         <button id="saveProject" class="primary" type="submit">Add Project</button>
       </div>
     </form>
@@ -197,9 +234,14 @@
         Branch
         <input id="branch" value="main" />
       </label>
-      <div class="warning">If the selected repository has existing content, your local files will be merged with it. Local files take priority on conflicts.</div>
+      <label>
+        Commit message <span class="muted">(optional)</span>
+        <textarea id="commitMessage" rows="3" maxlength="5000" placeholder="Describe your changes…" aria-describedby="commitMessageHint"></textarea>
+      </label>
+      <small id="commitMessageHint" class="muted">Leave blank to use the automatic timestamped message. Unchanged files create no new commit.</small>
+      <div class="warning">Files from GitHub are preserved. If the same file changed in both places, you will be asked before replacing the GitHub version.</div>
       <div class="dialog-actions">
-        <button class="ghost" value="cancel">Cancel</button>
+        <button id="cancelPush" class="ghost" type="button">Cancel</button>
         <button id="confirmPush" class="primary" type="submit">Push</button>
       </div>
     </form>
@@ -210,5 +252,6 @@
 
   <script src="config.js"></script>
   <script src="app.js"></script>
+  <script src="editor.js"></script>
 </body>
 </html>

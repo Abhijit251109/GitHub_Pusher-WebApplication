@@ -1,32 +1,39 @@
-# GitHub Project Pusher — Push and Cancel Fix
+# GitHub Pusher Studio
 
-This is a small source patch for the public `GitHub_Pusher-WebApplication` project. It does not contain the full app, an APK, an installer, or dependencies. It updates the existing project in place and preserves the rest of the repository.
+An installable project workspace for browsing and editing files, fetching GitHub changes, and pushing projects with optional custom commit messages. Includes a responsive dashboard, dark/light/system themes, GitHub sign-in, private persistent storage, conflict checks and safety snapshots.
 
-## What it fixes
+## Browse, edit, fetch and push
 
-- The Push dialog's Cancel button was submitted through the same form handler as Push, so cancel could invoke the push action instead of cancelling it.
-- The Add Project dialog had the same form-submission issue: Cancel could be interpreted as Add.
-- Cancelling a push now aborts the browser request. The server monitors the response connection and passes an abort signal to Git child processes so ongoing Git work can stop.
-- Git fetch failures are no longer swallowed and replaced with a confusing later push error.
-- The remote-history check now runs even when a new local project has untracked files. The app gives safer, more descriptive errors for unrelated, newer, or divergent branch history and never force-pushes over remote history.
-- Branch names receive validation, Git errors are translated into more actionable messages, and a JavaScript syntax-check command/workflow is added.
+1. Add a project folder or files and select the project.
+2. Choose **Open Selected** to browse folders and open an existing text file.
+3. Edit the contents and choose **Save file** (Ctrl/⌘ + S).
+4. Choose **Fetch Changes** to check GitHub updates. Saved edits are preserved; conflicting changes are reported.
+5. Choose **Push Selected**, review the repository and branch, and optionally enter a commit message. Blank or whitespace-only input uses `Sync from GitHub Pusher Studio [timestamp]` (or the configured `APP_NAME`). Identical content creates no new commit.
 
-## Apply safely on Windows
+The editor saves to the account's app workspace. It does not modify the original folder uploaded from your device. Saving does not commit or push to GitHub. The existing periodic GitHub sync remains; no AI integration or AI-triggered actions are included.
 
-1. Extract this ZIP into the **root** of your existing `GitHub_Pusher-WebApplication` repository, merging the `.github` folder if prompted. Do not replace the project with this patch folder.
-2. Open PowerShell in the repository root and run:
+The editor supports existing UTF-8 text files up to 2 MiB. Binary files, symbolic links, Git internals and excluded generated folders cannot be edited. A stale file version is rejected rather than overwriting newer edits from another tab or device. Unsaved drafts are protected when changing projects or leaving the page.
 
-   ```powershell
-   node .\apply-fixes.mjs
-   npm install --no-audit --no-fund
-   npm run test:syntax
-   git diff --check
-   ```
+## Run locally
 
-3. Review the changes with `git diff` before committing or deploying.
+Use the Node version in `.nvmrc` and Git on PATH. Copy `.env.example` to `.env` and configure your GitHub OAuth app, session/encryption secrets and Supabase connection. See [deployment setup](docs/DEPLOYMENT.md) and [security settings](SECURITY.md).
 
-The script validates its source anchors and syntax-checks the new JavaScript before writing changes. It also saves original copies of the four edited files to a temporary backup folder and prints that path.
+```sh
+npm ci
+npm start
+```
 
-## Important limitation
+Production requires persistent Supabase database and private Storage, using the existing [schema](supabase/schema.sql). This release requires no new database tables or migration. Never put the server's secret key in the public frontend.
 
-Cancellation can stop an in-progress Git subprocess, but it cannot automatically undo a commit that GitHub has already accepted. If a repository branch already contains a different history, choose an empty branch/repository or merge the remote history first. The app deliberately avoids force-pushing.
+## Validation
+
+```sh
+npm run test:syntax
+npm test
+node scripts/verify-project.mjs
+git diff --check
+```
+
+Tests cover real Git push/pull behavior with local remotes, authenticated HTTP routes against mocked persistence, file editing and ownership, stale versions, binary/large files, upload failure recovery, and exact custom commit messages.
+
+The [user guide](docs/USER_GUIDE.md) describes snapshots and conflict handling. Native desktop/Android packaging and the PWA use the GitHub Pusher Studio name; existing app IDs, OAuth callback schemes, repository URLs and installer filenames are preserved for compatibility.

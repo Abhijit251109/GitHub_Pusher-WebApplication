@@ -1,4 +1,4 @@
-# User Guide
+# GitHub Pusher Studio User Guide
 
 ## Add a project
 
@@ -7,6 +7,18 @@ Use **Add Project** and select a project directory. The project is copied into t
 Every selected file must arrive at its own path. The browser sends the list of files it selected, and the server compares it with what it received. If any file is missing, has the wrong size, has an unsafe name, or shares its path with another file, nothing is stored and the error lists the files. Some phone browsers drop the folder structure when you pick a folder; the app detects this and refuses the upload rather than mixing files from different subfolders.
 
 Projects added before this check existed were stored with every file at the top level, and files with the same name in different folders overwrote each other. Remove those projects and add them again.
+
+## Open and edit a project
+
+Select a project and choose **Open Selected**. Click a folder to browse its contents; use **Root** or **↑** to navigate back. Click a file to view and edit it. Existing UTF-8 text files up to 2 MiB are supported. Binary files and Git metadata remain unchanged.
+
+Choose **Save file** or press Ctrl/⌘ + S to persist the edit to your app workspace. The original folder uploaded from your phone or computer is unchanged, and saving does not commit to GitHub. A safety snapshot is saved before each changed file. Saving an unchanged file creates no new version.
+
+Save or discard a draft before fetching or pushing. Switching projects, opening another file, closing the editor or leaving the page protects unsaved work. If another tab/device or a GitHub pull changed the file after you opened it, the save is rejected. Keep a copy of your draft and reopen the file to review the latest contents.
+
+## Fetch Changes
+
+Choose **Fetch Changes** to pull the connected branch into the app workspace. The editor reloads saved file contents afterward. If both your saved project and GitHub changed, the existing pull safety checks keep your edits and report a conflict. Review the project status; pushing offers the existing explicit conflict choice.
 
 ## Remove a project
 
@@ -18,9 +30,11 @@ Choose **Connect GitHub** and complete GitHub authorization. No personal access 
 
 ## Push
 
-Select a project, choose a repository, then press **Push to GitHub**. If no repository is selected, create a new repository from the push dialog.
+Select a project, choose **Push Selected**, then choose a repository and branch and press **Push**. The connected repository is selected by default. If no repository is selected, create a new repository from the push dialog.
 
 If the project has no `.git` directory, the server initializes it automatically before the first push.
+
+The **Commit message** field is optional. Enter your own text to use it as the commit message, including multiple lines. Leave it blank or whitespace-only to keep the automatic timestamped message. No new commit is created when files are unchanged. Your message is kept if pushing fails or you cancel the dialog.
 
 Push safety rules:
 

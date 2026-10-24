@@ -143,6 +143,8 @@ const counters = { oauthInserts: 0, storageReads: 0 };
 // Seeded projects (u1-u6) have failing Storage; anything else lives in this in-memory store, so a
 // real upload followed by a delete can be checked end to end.
 const store = new Map(); // object path -> Buffer
+let failEditorManifest = false;
+let failEditorRow = null;
 const projectRows = new Map(); // id -> row written by the server
 // u7 uploads and deletes a real project; u8 probes unknown project ids. Neither has seeded data.
 users.u7 = { token: 'token-u7', id: '1007', projectId: null };
@@ -156,10 +158,10 @@ for (const u of [users.u7, users.u8, users.u9, users.u10]) byHash.set(tokenHash(
 async function storageRoute(req, res, rest, body, send) {
   const BUCKET = 'gpp-private/';
   if (req.method === 'POST' && rest.startsWith('list/')) {
-    const { prefix = '' } = JSON.parse(body.toString() || '{}');
+    const { prefix = '', offset = 0, limit = 1000 } = JSON.parse(body.toString() || '{}');
     const dir = prefix.replace(/\/$/, '') + '/';
-    const names = [...store.keys()].filter(k => k.startsWith(dir) && !k.slice(dir.length).includes('/')).map(k => k.slice(dir.length));
-    return send(200, names.map(name => ({ name, id: `id-${name}`, metadata: { size: store.get(dir + name).length } })));
+    const names = [...new Set([...store.keys()].filter(k => k.startsWith(dir)).map(k => k.slice(dir.length).split('/')[0]))].sort().slice(offset, offset + limit);
+    return send(200, names.map(name => store.has(dir + name) ? { name, id: `id-${name}`, metadata: { size: store.get(dir + name).length } } : { name, id: null, metadata: null }));
   }
   if (req.method === 'DELETE') {
     const { prefixes = [] } = JSON.parse(body.toString() || '{}');
@@ -171,6 +173,10 @@ async function storageRoute(req, res, rest, body, send) {
     return store.has(key) ? send(200, { name: key, size: store.get(key).length }) : send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
   }
   const key = decodeURIComponent(rest.slice(BUCKET.length));
+  if (failEditorManifest && ['POST', 'PUT'].includes(req.method) && key.includes('/edits/') && key.endsWith('/manifest.json')) {
+    failEditorManifest = false;
+    return send(500, { statusCode: '500', error: 'internal', message: 'Simulated editor manifest upload failure' });
+  }
   if (req.method === 'POST' || req.method === 'PUT') { store.set(key, body); return send(200, { Key: BUCKET + key }); }
   if (store.has(key)) { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.end(store.get(key)); }
   return send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
@@ -194,7 +200,13 @@ function mockSupabase() {
     }
     const table = url.pathname.replace('/rest/v1/', '');
     if (table === 'projects' && req.method === 'POST') {
-      for (const row of [].concat(JSON.parse(body.toString()))) projectRows.set(row.id, row);
+      const rows = [].concat(JSON.parse(body.toString()));
+      if (failEditorRow && rows.some(row => row.storage_path?.includes('/edits/'))) {
+        if (failEditorRow === 'after-write') for (const row of rows) projectRows.set(row.id, row);
+        failEditorRow = null;
+        return send(500, { message: 'Simulated editor row acknowledgement failure' });
+      }
+      for (const row of rows) projectRows.set(row.id, row);
       return send(201, []);
     }
     if (table === 'projects' && req.method === 'DELETE') { projectRows.delete(eq('id')); return send(204); }
@@ -473,4 +485,108 @@ test('e2e: a path uploaded both as a file and as a folder is refused', async () 
   assert.equal(res.status, 422, JSON.stringify(body));
   assert.equal(body.code, 'PATH_CONFLICT');
   assert.equal(store.size, before);
+});
+
+test('e2e: editor opens nested files, saves persistently, rejects stale tabs and enforces ownership', async () => {
+  const up = await upload(users.u9, uploadForm('editor', { 'src/app.js': 'console.log("before");\r\n', 'README.md': 'readme', 'logo.bin': new Uint8Array([0, 1, 2]) }));
+  const project = await up.json();
+  assert.equal(up.status, 200, JSON.stringify(project));
+  const endpoint = `/api/projects/${project.id}`;
+  const root = await asUser(users.u9, 'GET', `${endpoint}/files`);
+  assert.equal(root.headers.get('cache-control'), 'no-store');
+  assert.deepEqual((await root.json()).entries.map(x => x.name), ['src', 'logo.bin', 'README.md']);
+  const dir = await asUser(users.u9, 'GET', `${endpoint}/files?path=src`);
+  assert.deepEqual((await dir.json()).entries.map(x => x.path), ['src/app.js']);
+  const opened = await (await asUser(users.u9, 'GET', `${endpoint}/file?path=src%2Fapp.js`)).json();
+  assert.equal(opened.content, 'console.log("before");\r\n');
+  const edit = { ...opened, content: 'console.log("after");\r\n' };
+  const deniedRead = await asUser(users.u8, 'GET', `${endpoint}/file?path=src%2Fapp.js`);
+  const deniedSave = await asUser(users.u8, 'POST', `${endpoint}/file`, edit);
+  assert.equal(deniedRead.status, 404);
+  assert.equal(deniedSave.status, 404);
+  const savedResponse = await asUser(users.u9, 'POST', `${endpoint}/file`, edit);
+  const saved = await savedResponse.json();
+  assert.equal(savedResponse.status, 200, JSON.stringify(saved));
+  assert.equal(saved.changed, true);
+  assert.notEqual(saved.sha, opened.sha);
+  const reloaded = await (await asUser(users.u9, 'GET', `${endpoint}/file?path=src%2Fapp.js`)).json();
+  assert.equal(reloaded.content, edit.content);
+  assert.equal(reloaded.sha, saved.sha);
+  const row = projectRows.get(project.id);
+  assert.match(row.storage_path, /\/edits\//);
+  assert.equal(row.sync_state, 'local');
+  assert.equal(JSON.parse(store.get(row.storage_path.replace('working.tgz', 'manifest.json'))).fileCount, 3);
+  const version = row.storage_path;
+  const unchanged = await asUser(users.u9, 'POST', `${endpoint}/file`, reloaded);
+  assert.equal((await unchanged.json()).changed, false);
+  assert.equal(projectRows.get(project.id).storage_path, version, 'no-op save uploads no new version');
+  const stale = await asUser(users.u9, 'POST', `${endpoint}/file`, edit);
+  assert.equal(stale.status, 409);
+  assert.equal((await stale.json()).code, 'FILE_CHANGED');
+  assert.equal(projectRows.get(project.id).storage_path, version);
+
+  for (const relative of ['../server.js', '.git/config', 'src/../../x']) {
+    const r = await asUser(users.u9, 'GET', `${endpoint}/file?path=${encodeURIComponent(relative)}`);
+    assert.equal(r.status, 400, relative);
+    assert.equal((await r.json()).code, 'INVALID_FILE_PATH');
+  }
+  const unauthenticated = await fetch(`${base}${endpoint}/files`);
+  assert.equal(unauthenticated.status, 401);
+});
+
+test('e2e: a failed editor upload leaves the previous archive and file content intact', async () => {
+  const up = await upload(users.u9, uploadForm('save-failure', { 'file.txt': 'original' }));
+  const project = await up.json();
+  const endpoint = `/api/projects/${project.id}/file`;
+  const opened = await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json();
+  const before = projectRows.get(project.id).storage_path;
+  const archive = Buffer.from(store.get(before));
+  failEditorManifest = true;
+  const failed = await asUser(users.u9, 'POST', endpoint, { ...opened, content: 'unsaved new text' });
+  assert.equal(failed.status, 500);
+  assert.equal(projectRows.get(project.id).storage_path, before);
+  assert.deepEqual(store.get(before), archive);
+  assert.equal((await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json()).content, 'original');
+  assert.equal([...store.keys()].filter(key => key.includes(`${project.id}/edits/`)).length, 0, 'failed version is cleaned up');
+});
+
+test('e2e: invalid commit messages are refused before storage or GitHub access', async () => {
+  const before = counters.storageReads;
+  for (const commitMessage of [42, ['bad'], 'x\0y', 'x'.repeat(5001)]) {
+    const response = await push(users.u8, { projectId: crypto.randomUUID(), commitMessage });
+    assert.equal(response.status, 400);
+    assert.equal((await response.json()).code, 'INVALID_COMMIT_MESSAGE');
+  }
+  assert.equal(counters.storageReads, before);
+});
+
+test('e2e: editor database failures never delete a referenced project archive', async () => {
+  for (const failure of ['before-write', 'after-write']) {
+    const up = await upload(users.u9, uploadForm('row-failure', { 'file.txt': 'original' }));
+    const project = await up.json();
+    const endpoint = `/api/projects/${project.id}/file`;
+    const opened = await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json();
+    failEditorRow = failure;
+    const failed = await asUser(users.u9, 'POST', endpoint, { ...opened, content: 'new content' });
+    assert.equal(failed.status, 500);
+    const row = projectRows.get(project.id);
+    assert.equal(store.has(row.storage_path), true, failure);
+    const reloaded = await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json();
+    assert.equal(reloaded.content, failure === 'before-write' ? 'original' : 'new content');
+    if (failure === 'before-write') assert.equal([...store.keys()].filter(key => key.includes(`${project.id}/edits/`)).length, 0);
+  }
+});
+
+test('e2e: removing an edited project deletes active and orphaned versions from nested folders', async () => {
+  const up = await upload(users.u9, uploadForm('remove-editor', { 'file.txt': 'original' }));
+  const project = await up.json();
+  const endpoint = `/api/projects/${project.id}`;
+  const opened = await (await asUser(users.u9, 'GET', `${endpoint}/file?path=file.txt`)).json();
+  const saved = await asUser(users.u9, 'POST', `${endpoint}/file`, { ...opened, content: 'saved edit' });
+  assert.equal(saved.status, 200, JSON.stringify(await saved.json()));
+  const orphan = `projects/${users.u9.id}/${project.id}/edits/orphan/working.tgz`;
+  store.set(orphan, Buffer.from('orphaned version'));
+  const deleted = await asUser(users.u9, 'DELETE', endpoint);
+  assert.deepEqual(await deleted.json(), { ok: true });
+  assert.equal([...store.keys()].filter(key => key.includes(project.id)).length, 0);
 });

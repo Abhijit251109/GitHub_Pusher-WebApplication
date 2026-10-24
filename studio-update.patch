@@ -1,0 +1,1490 @@
+From e1293f72db048485f83ae79a51167a86bd5f5641 Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Sat, 24 Oct 2026 20:49:39 +0530
+Subject: [PATCH] Add GitHub Pusher Studio editor and custom commit messages
+
+---
+ .env.example                                  |   3 +-
+ README.md                                     |  51 +++--
+ android/app/src/main/res/values/strings.xml   |   4 +-
+ capacitor.config.ts                           |   2 +-
+ docs/USER_GUIDE.md                            |  18 +-
+ electron-builder.yml                          |   4 +-
+ electron/main.cjs                             |   2 +-
+ lib/project-files.js                          |  87 ++++++++
+ lib/push-core.js                              |   2 +-
+ lib/security.js                               |   8 +
+ login.html                                    |   8 +-
+ .../android/app/src/main/AndroidManifest.xml  |   2 +-
+ native/android/settings.gradle                |   2 +-
+ package-lock.json                             |   8 +-
+ package.json                                  |   8 +-
+ .../templates/capacitor.config.ts             |   2 +-
+ .../templates/electron-builder.yml            |   4 +-
+ .../templates/electron/main.cjs               |   2 +-
+ public/app.js                                 |  17 +-
+ public/editor.js                              | 199 ++++++++++++++++++
+ public/index.html                             |  63 +++++-
+ public/login.html                             |   6 +-
+ public/manifest.webmanifest                   |   6 +-
+ public/styles.css                             |  45 ++++
+ public/sw.js                                  |   4 +-
+ render.yaml                                   |   2 +-
+ scripts/test-project-files.mjs                |  72 +++++++
+ scripts/test-push-safety.mjs                  |  13 ++
+ scripts/test-security.mjs                     | 124 ++++++++++-
+ server.js                                     | 128 +++++++++--
+ 30 files changed, 800 insertions(+), 96 deletions(-)
+ create mode 100644 lib/project-files.js
+ create mode 100644 public/editor.js
+ create mode 100644 scripts/test-project-files.mjs
+
+diff --git a/.env.example b/.env.example
+index b6c6871..8cd0e75 100644
+--- a/.env.example
++++ b/.env.example
+@@ -41,7 +41,7 @@ REQUIRE_GITHUB_ALLOWLIST=true
+ ALLOWED_GITHUB_USER_IDS=YOUR_NUMERIC_GITHUB_USER_ID
+ 
+ # Branding
+-APP_NAME=GitHub Project Pusher
++APP_NAME=GitHub Pusher Studio
+ MAX_EXTRACTED_MB=500
+ MAX_ARCHIVE_ENTRIES=50000
+ MAX_DECOMPRESSION_RATIO=200
+@@ -53,6 +53,7 @@ RATE_LIMIT_API_PER_MINUTE=300
+ RATE_LIMIT_AUTH_PER_15_MIN=20
+ RATE_LIMIT_PUSH_PER_15_MIN=20
+ RATE_LIMIT_FETCH_PER_15_MIN=30
++RATE_LIMIT_EDITOR_PER_15_MIN=300
+ RATE_LIMIT_UPLOAD_PER_15_MIN=10
+ 
+ # Time limits in milliseconds (defaults shown). A git call is killed after GIT_TIMEOUT_MS; a push,
+diff --git a/README.md b/README.md
+index 0ae78af..62cca68 100644
+--- a/README.md
++++ b/README.md
+@@ -1,32 +1,39 @@
+-# GitHub Project Pusher — Push and Cancel Fix
++# GitHub Pusher Studio
+ 
+-This is a small source patch for the public `GitHub_Pusher-WebApplication` project. It does not contain the full app, an APK, an installer, or dependencies. It updates the existing project in place and preserves the rest of the repository.
++An installable project workspace for browsing and editing files, fetching GitHub changes, and pushing projects with optional custom commit messages. Includes a responsive dashboard, dark/light/system themes, GitHub sign-in, private persistent storage, conflict checks and safety snapshots.
+ 
+-## What it fixes
++## Browse, edit, fetch and push
+ 
+-- The Push dialog's Cancel button was submitted through the same form handler as Push, so cancel could invoke the push action instead of cancelling it.
+-- The Add Project dialog had the same form-submission issue: Cancel could be interpreted as Add.
+-- Cancelling a push now aborts the browser request. The server monitors the response connection and passes an abort signal to Git child processes so ongoing Git work can stop.
+-- Git fetch failures are no longer swallowed and replaced with a confusing later push error.
+-- The remote-history check now runs even when a new local project has untracked files. The app gives safer, more descriptive errors for unrelated, newer, or divergent branch history and never force-pushes over remote history.
+-- Branch names receive validation, Git errors are translated into more actionable messages, and a JavaScript syntax-check command/workflow is added.
++1. Add a project folder or files and select the project.
++2. Choose **Open Selected** to browse folders and open an existing text file.
++3. Edit the contents and choose **Save file** (Ctrl/⌘ + S).
++4. Choose **Fetch Changes** to check GitHub updates. Saved edits are preserved; conflicting changes are reported.
++5. Choose **Push Selected**, review the repository and branch, and optionally enter a commit message. Blank or whitespace-only input uses `Sync from GitHub Pusher Studio [timestamp]` (or the configured `APP_NAME`). Identical content creates no new commit.
+ 
+-## Apply safely on Windows
++The editor saves to the account's app workspace. It does not modify the original folder uploaded from your device. Saving does not commit or push to GitHub. The existing periodic GitHub sync remains; no AI integration or AI-triggered actions are included.
+ 
+-1. Extract this ZIP into the **root** of your existing `GitHub_Pusher-WebApplication` repository, merging the `.github` folder if prompted. Do not replace the project with this patch folder.
+-2. Open PowerShell in the repository root and run:
++The editor supports existing UTF-8 text files up to 2 MiB. Binary files, symbolic links, Git internals and excluded generated folders cannot be edited. A stale file version is rejected rather than overwriting newer edits from another tab or device. Unsaved drafts are protected when changing projects or leaving the page.
+ 
+-   ```powershell
+-   node .\apply-fixes.mjs
+-   npm install --no-audit --no-fund
+-   npm run test:syntax
+-   git diff --check
+-   ```
++## Run locally
+ 
+-3. Review the changes with `git diff` before committing or deploying.
++Use the Node version in `.nvmrc` and Git on PATH. Copy `.env.example` to `.env` and configure your GitHub OAuth app, session/encryption secrets and Supabase connection. See [deployment setup](docs/DEPLOYMENT.md) and [security settings](SECURITY.md).
+ 
+-The script validates its source anchors and syntax-checks the new JavaScript before writing changes. It also saves original copies of the four edited files to a temporary backup folder and prints that path.
++```sh
++npm ci
++npm start
++```
+ 
+-## Important limitation
++Production requires persistent Supabase database and private Storage, using the existing [schema](supabase/schema.sql). This release requires no new database tables or migration. Never put the server's secret key in the public frontend.
+ 
+-Cancellation can stop an in-progress Git subprocess, but it cannot automatically undo a commit that GitHub has already accepted. If a repository branch already contains a different history, choose an empty branch/repository or merge the remote history first. The app deliberately avoids force-pushing.
++## Validation
++
++```sh
++npm run test:syntax
++npm test
++node scripts/verify-project.mjs
++git diff --check
++```
++
++Tests cover real Git push/pull behavior with local remotes, authenticated HTTP routes against mocked persistence, file editing and ownership, stale versions, binary/large files, upload failure recovery, and exact custom commit messages.
++
++The [user guide](docs/USER_GUIDE.md) describes snapshots and conflict handling. Native desktop/Android packaging and the PWA use the GitHub Pusher Studio name; existing app IDs, OAuth callback schemes, repository URLs and installer filenames are preserved for compatibility.
+diff --git a/android/app/src/main/res/values/strings.xml b/android/app/src/main/res/values/strings.xml
+index 12de2ff..f92be3f 100644
+--- a/android/app/src/main/res/values/strings.xml
++++ b/android/app/src/main/res/values/strings.xml
+@@ -1,7 +1,7 @@
+ <?xml version='1.0' encoding='utf-8'?>
+ <resources>
+-    <string name="app_name">GitHub Project Pusher</string>
+-    <string name="title_activity_main">GitHub Project Pusher</string>
++    <string name="app_name">GitHub Pusher Studio</string>
++    <string name="title_activity_main">GitHub Pusher Studio</string>
+     <string name="package_name">com.githubprojectpusher.app</string>
+     <string name="custom_url_scheme">com.githubprojectpusher.app</string>
+ </resources>
+diff --git a/capacitor.config.ts b/capacitor.config.ts
+index 5cefa8b..18adcab 100644
+--- a/capacitor.config.ts
++++ b/capacitor.config.ts
+@@ -5,7 +5,7 @@ const appUrl = process.env.GPP_APP_URL || process.env.PUBLIC_BASE_URL || 'https:
+ 
+ const config: CapacitorConfig = {
+   appId: 'com.githubprojectpusher.app',
+-  appName: 'GitHub Project Pusher',
++  appName: 'GitHub Pusher Studio',
+   webDir: 'public',
+   server: {
+     url: appUrl,
+diff --git a/docs/USER_GUIDE.md b/docs/USER_GUIDE.md
+index 64d5a4c..63eade6 100644
+--- a/docs/USER_GUIDE.md
++++ b/docs/USER_GUIDE.md
+@@ -1,4 +1,4 @@
+-# User Guide
++# GitHub Pusher Studio User Guide
+ 
+ ## Add a project
+ 
+@@ -8,6 +8,18 @@ Every selected file must arrive at its own path. The browser sends the list of f
+ 
+ Projects added before this check existed were stored with every file at the top level, and files with the same name in different folders overwrote each other. Remove those projects and add them again.
+ 
++## Open and edit a project
++
++Select a project and choose **Open Selected**. Click a folder to browse its contents; use **Root** or **↑** to navigate back. Click a file to view and edit it. Existing UTF-8 text files up to 2 MiB are supported. Binary files and Git metadata remain unchanged.
++
++Choose **Save file** or press Ctrl/⌘ + S to persist the edit to your app workspace. The original folder uploaded from your phone or computer is unchanged, and saving does not commit to GitHub. A safety snapshot is saved before each changed file. Saving an unchanged file creates no new version.
++
++Save or discard a draft before fetching or pushing. Switching projects, opening another file, closing the editor or leaving the page protects unsaved work. If another tab/device or a GitHub pull changed the file after you opened it, the save is rejected. Keep a copy of your draft and reopen the file to review the latest contents.
++
++## Fetch Changes
++
++Choose **Fetch Changes** to pull the connected branch into the app workspace. The editor reloads saved file contents afterward. If both your saved project and GitHub changed, the existing pull safety checks keep your edits and report a conflict. Review the project status; pushing offers the existing explicit conflict choice.
++
+ ## Remove a project
+ 
+ Select the project and choose **Remove**. Removing it from the library does not delete the corresponding GitHub repository.
+@@ -18,10 +30,12 @@ Choose **Connect GitHub** and complete GitHub authorization. No personal access
+ 
+ ## Push
+ 
+-Select a project, choose a repository, then press **Push to GitHub**. If no repository is selected, create a new repository from the push dialog.
++Select a project, choose **Push Selected**, then choose a repository and branch and press **Push**. The connected repository is selected by default. If no repository is selected, create a new repository from the push dialog.
+ 
+ If the project has no `.git` directory, the server initializes it automatically before the first push.
+ 
++The **Commit message** field is optional. Enter your own text to use it as the commit message, including multiple lines. Leave it blank or whitespace-only to keep the automatic timestamped message. No new commit is created when files are unchanged. Your message is kept if pushing fails or you cancel the dialog.
++
+ Push safety rules:
+ 
+ - A project is only added once its files are verifiably saved to cloud storage. If saving fails, Add Project shows an error instead of creating an empty project.
+diff --git a/electron-builder.yml b/electron-builder.yml
+index 5ce500f..a8b9bcd 100644
+--- a/electron-builder.yml
++++ b/electron-builder.yml
+@@ -1,11 +1,11 @@
+ appId: com.githubprojectpusher.app
+-productName: GitHub Project Pusher
++productName: GitHub Pusher Studio
+ files:
+   - electron/**
+ mac:
+   target: dmg
+   protocols:
+-    - name: GitHub Project Pusher OAuth
++    - name: GitHub Pusher Studio OAuth
+       schemes:
+         - com.githubprojectpusher.app
+ win:
+diff --git a/electron/main.cjs b/electron/main.cjs
+index 285932a..d1ca12d 100644
+--- a/electron/main.cjs
++++ b/electron/main.cjs
+@@ -125,7 +125,7 @@ if (!hasSingleInstanceLock) {
+     });
+     mainWindow.webContents.on('did-finish-load', openPendingOAuthCallback);
+     mainWindow.on('closed', () => { mainWindow = null; });
+-    mainWindow.loadURL(APP_URL).catch(error => console.error('Could not load GitHub Project Pusher:', error.message));
++    mainWindow.loadURL(APP_URL).catch(error => console.error('Could not load GitHub Pusher Studio:', error.message));
+   }
+ 
+   app.whenReady().then(() => {
+diff --git a/lib/project-files.js b/lib/project-files.js
+new file mode 100644
+index 0000000..6dca654
+--- /dev/null
++++ b/lib/project-files.js
+@@ -0,0 +1,87 @@
++// The editor only reads and changes existing regular UTF-8 files in a restored workspace.
++import fs from 'node:fs/promises';
++import path from 'node:path';
++import crypto from 'node:crypto';
++import { AppError } from './security.js';
++import { isArchiveExcluded } from './push-core.js';
++
++export const MAX_EDITOR_BYTES = 2 * 1024 * 1024;
++const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
++const binaryControls = /[\u0000-\u0008\u000b\u000e-\u001f\u007f]/;
++
++export function parseEditorPath(value, { directory = false } = {}) {
++  if (directory && (value === undefined || value === '')) return '';
++  if (typeof value !== 'string' || !value || value.length > 4096 || /[\\:\u0000-\u001f\u007f]/.test(value)) {
++    throw new AppError('INVALID_FILE_PATH', 'Choose a valid project file or folder.');
++  }
++  const parts = value.split('/');
++  if (parts.some(part => !part || part === '.' || part === '..' || /^\.git[. ]*$/i.test(part)) || isArchiveExcluded(value)) {
++    throw new AppError('INVALID_FILE_PATH', 'This path is outside the editable project files.');
++  }
++  return value;
++}
++
++async function existingPath(root, relative, directory) {
++  let absolute = root;
++  const parts = relative ? relative.split('/') : [];
++  for (let i = 0; i < parts.length; i++) {
++    absolute = path.join(absolute, parts[i]);
++    let stat;
++    try { stat = await fs.lstat(absolute); } catch (e) {
++      if (e.code === 'ENOENT' || e.code === 'ENOTDIR') throw new AppError('FILE_NOT_FOUND', 'This file or folder no longer exists. Refresh the explorer.', { status: 404 });
++      throw e;
++    }
++    if (stat.isSymbolicLink() || (i < parts.length - 1 && !stat.isDirectory())) {
++      throw new AppError('INVALID_FILE_PATH', 'Links and special files cannot be opened in the editor.');
++    }
++    if (i === parts.length - 1 && !(directory ? stat.isDirectory() : stat.isFile())) {
++      throw new AppError('INVALID_FILE_PATH', directory ? 'Choose a folder.' : 'Choose a regular file.');
++    }
++  }
++  return absolute;
++}
++
++export async function listEditorDirectory(root, value) {
++  const relative = parseEditorPath(value, { directory: true });
++  const absolute = await existingPath(root, relative, true);
++  const entries = [];
++  for (const entry of await fs.readdir(absolute, { withFileTypes: true })) {
++    const rel = relative ? `${relative}/${entry.name}` : entry.name;
++    try { parseEditorPath(rel); } catch { continue; }
++    if (entry.isDirectory()) entries.push({ name: entry.name, path: rel, type: 'directory' });
++    else if (entry.isFile()) entries.push({ name: entry.name, path: rel, type: 'file', size: (await fs.stat(path.join(absolute, entry.name))).size });
++  }
++  entries.sort((a, b) => Number(b.type === 'directory') - Number(a.type === 'directory') || a.name.localeCompare(b.name));
++  return { path: relative, entries, maxEditorBytes: MAX_EDITOR_BYTES };
++}
++
++export async function readEditorFile(root, value) {
++  const relative = parseEditorPath(value);
++  const absolute = await existingPath(root, relative, false);
++  if ((await fs.stat(absolute)).size > MAX_EDITOR_BYTES) throw new AppError('FILE_TOO_LARGE', 'The editor supports text files up to 2 MiB.', { status: 413 });
++  const bytes = await fs.readFile(absolute);
++  let content;
++  try { content = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(bytes); } catch {
++    throw new AppError('BINARY_FILE', 'This file is binary or uses an unsupported text encoding. It is kept unchanged.', { status: 415 });
++  }
++  if (binaryControls.test(content)) throw new AppError('BINARY_FILE', 'Binary files cannot be edited. This file is kept unchanged.', { status: 415 });
++  return { path: relative, content, sha: hash(bytes), size: bytes.length };
++}
++
++export function parseFileEdit(body = {}) {
++  const relative = parseEditorPath(body.path);
++  if (typeof body.content !== 'string' || binaryControls.test(body.content)) throw new AppError('INVALID_FILE_CONTENT', 'File contents must be UTF-8 text.');
++  if (Buffer.byteLength(body.content, 'utf8') > MAX_EDITOR_BYTES) throw new AppError('FILE_TOO_LARGE', 'The editor supports text files up to 2 MiB.', { status: 413 });
++  if (typeof body.sha !== 'string' || !/^[a-f0-9]{64}$/.test(body.sha)) throw new AppError('INVALID_FILE_VERSION', 'Reopen this file before saving.');
++  return { path: relative, content: body.content, sha: body.sha };
++}
++
++export async function writeEditorFile(root, edit) {
++  const current = await readEditorFile(root, edit.path);
++  if (current.sha !== edit.sha) throw new AppError('FILE_CHANGED', 'This file changed since you opened it. Copy your draft, then reopen the file to review the latest version.', { status: 409 });
++  const bytes = Buffer.from(edit.content, 'utf8');
++  const sha = hash(bytes);
++  if (sha === current.sha) return { ...current, changed: false };
++  await fs.writeFile(await existingPath(root, edit.path, false), bytes);
++  return { path: edit.path, content: edit.content, sha, size: bytes.length, changed: true };
++}
+diff --git a/lib/push-core.js b/lib/push-core.js
+index 6273ff0..2e8e94a 100644
+--- a/lib/push-core.js
++++ b/lib/push-core.js
+@@ -262,7 +262,7 @@ export async function commitAndPush({ git, dir, branch, defaultBranch, knownComm
+   }
+   if (same && branchTip) return { outcome: 'no-changes', commit: base, fileCount: tracked, restored, overwritten, special };
+   // Same content as the default branch: the new branch is pushed pointing at its tip.
+-  if (!same) await git(['commit', '-m', message]);
++  if (!same) await git(['commit', '--cleanup=verbatim', '-m', message]);
+   const commit = (await git(['rev-parse', 'HEAD'])).stdout.trim();
+ 
+   try {
+diff --git a/lib/security.js b/lib/security.js
+index c5631cc..3661feb 100644
+--- a/lib/security.js
++++ b/lib/security.js
+@@ -90,6 +90,14 @@ export function parseOptionalString(value, field, { max = 200 } = {}) {
+   return value;
+ }
+ 
++export function parseCommitMessage(value) {
++  if (value === undefined || value === null) return null;
++  if (typeof value !== 'string' || value.length > 5000 || /[\u0000-\u0008\u000b\u000e-\u001f\u007f]/.test(value)) {
++    throw new AppError('INVALID_COMMIT_MESSAGE', 'Commit message must be text of at most 5000 characters.');
++  }
++  return value.trim() ? value : null;
++}
++
+ export function parseEnum(value, field, allowed, fallback) {
+   if (value === undefined || value === null || value === '') return fallback;
+   if (!allowed.includes(value)) throw new AppError('INVALID_INPUT', `${field} must be one of: ${allowed.join(', ')}.`);
+diff --git a/login.html b/login.html
+index f77f8cd..5cf1add 100644
+--- a/login.html
++++ b/login.html
+@@ -4,7 +4,7 @@
+ <meta charset="utf-8">
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+ <meta name="theme-color" content="#111827">
+-<title>GitHub Project Pusher — Login</title>
++<title>GitHub Pusher Studio — Login</title>
+ <style>
+   :root {
+     color-scheme: dark;
+@@ -191,10 +191,10 @@
+ </head>
+ <body>
+ <main>
+-  <h1>GitHub Project Pusher</h1>
++  <h1>GitHub Pusher Studio</h1>
+   <p id="status" class="muted">Opening GitHub login…</p>
+   <div id="setup" class="hidden">
+-    <p class="muted">This file is being opened directly. Enter the URL where your GitHub Project Pusher server is running.</p>
++    <p class="muted">This file is being opened directly. Enter the URL where your GitHub Pusher Studio server is running.</p>
+     <input id="appUrl" class="url" placeholder="https://your-domain.example" autocomplete="url">
+     <div class="row">
+       <button id="go">Open GitHub login</button>
+@@ -232,7 +232,7 @@
+   // Standalone file: use a previously saved server URL, otherwise ask once.
+   const saved = localStorage.getItem('gpp_app_url');
+   if (saved) {
+-    status.textContent = 'Opening your GitHub Project Pusher server…';
++    status.textContent = 'Opening your GitHub Pusher Studio server…';
+     go(saved);
+     return;
+   }
+diff --git a/native/android/app/src/main/AndroidManifest.xml b/native/android/app/src/main/AndroidManifest.xml
+index e6c2189..16fa41a 100644
+--- a/native/android/app/src/main/AndroidManifest.xml
++++ b/native/android/app/src/main/AndroidManifest.xml
+@@ -3,7 +3,7 @@
+     <uses-permission android:name="android.permission.INTERNET" />
+     <application
+         android:allowBackup="true"
+-        android:label="GitHub Project Pusher"
++        android:label="GitHub Pusher Studio"
+         android:supportsRtl="true">
+         <activity android:launchMode="singleTask"
+             android:name=".MainActivity"
+diff --git a/native/android/settings.gradle b/native/android/settings.gradle
+index 3b46f58..e56dd39 100644
+--- a/native/android/settings.gradle
++++ b/native/android/settings.gradle
+@@ -14,7 +14,7 @@ dependencyResolutionManagement {
+     }
+ }
+ 
+-rootProject.name = 'GitHub Project Pusher'
++rootProject.name = 'GitHub Pusher Studio'
+ include ':app'
+ include ':capacitor-android'
+ project(':capacitor-android').projectDir = new File('../../node_modules/@capacitor/android/capacitor')
+diff --git a/package-lock.json b/package-lock.json
+index caa35c7..5db4e17 100644
+--- a/package-lock.json
++++ b/package-lock.json
+@@ -1,12 +1,12 @@
+ {
+-  "name": "github-project-pusher",
+-  "version": "3.0.0",
++  "name": "github-pusher-studio",
++  "version": "3.1.0",
+   "lockfileVersion": 3,
+   "requires": true,
+   "packages": {
+     "": {
+-      "name": "github-project-pusher",
+-      "version": "3.0.0",
++      "name": "github-pusher-studio",
++      "version": "3.1.0",
+       "license": "ISC",
+       "dependencies": {
+         "@supabase/supabase-js": "2.57.4",
+diff --git a/package.json b/package.json
+index faf7253..063bd9d 100644
+--- a/package.json
++++ b/package.json
+@@ -1,6 +1,6 @@
+ {
+-  "name": "github-project-pusher",
+-  "version": "3.0.0",
++  "name": "github-pusher-studio",
++  "version": "3.1.0",
+   "private": true,
+   "type": "module",
+   "scripts": {
+@@ -11,8 +11,8 @@
+     "build:windows-installer": "electron-builder --config electron-builder.yml --win msi",
+     "build:android": "node scripts/build-android.mjs",
+     "prepare:android": "node scripts/prepare-android.mjs",
+-    "test": "node --test scripts/test-push-safety.mjs scripts/test-security.mjs",
+-    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check lib/git.js && node --check public/app.js"
++    "test": "node --test scripts/test-push-safety.mjs scripts/test-security.mjs scripts/test-project-files.mjs",
++    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check lib/git.js && node --check lib/project-files.js && node --check public/app.js && node --check public/editor.js"
+   },
+   "dependencies": {
+     "@supabase/supabase-js": "2.57.4",
+diff --git a/platform-oauth-patch/templates/capacitor.config.ts b/platform-oauth-patch/templates/capacitor.config.ts
+index 5cefa8b..18adcab 100644
+--- a/platform-oauth-patch/templates/capacitor.config.ts
++++ b/platform-oauth-patch/templates/capacitor.config.ts
+@@ -5,7 +5,7 @@ const appUrl = process.env.GPP_APP_URL || process.env.PUBLIC_BASE_URL || 'https:
+ 
+ const config: CapacitorConfig = {
+   appId: 'com.githubprojectpusher.app',
+-  appName: 'GitHub Project Pusher',
++  appName: 'GitHub Pusher Studio',
+   webDir: 'public',
+   server: {
+     url: appUrl,
+diff --git a/platform-oauth-patch/templates/electron-builder.yml b/platform-oauth-patch/templates/electron-builder.yml
+index 5ce500f..a8b9bcd 100644
+--- a/platform-oauth-patch/templates/electron-builder.yml
++++ b/platform-oauth-patch/templates/electron-builder.yml
+@@ -1,11 +1,11 @@
+ appId: com.githubprojectpusher.app
+-productName: GitHub Project Pusher
++productName: GitHub Pusher Studio
+ files:
+   - electron/**
+ mac:
+   target: dmg
+   protocols:
+-    - name: GitHub Project Pusher OAuth
++    - name: GitHub Pusher Studio OAuth
+       schemes:
+         - com.githubprojectpusher.app
+ win:
+diff --git a/platform-oauth-patch/templates/electron/main.cjs b/platform-oauth-patch/templates/electron/main.cjs
+index 285932a..d1ca12d 100644
+--- a/platform-oauth-patch/templates/electron/main.cjs
++++ b/platform-oauth-patch/templates/electron/main.cjs
+@@ -125,7 +125,7 @@ if (!hasSingleInstanceLock) {
+     });
+     mainWindow.webContents.on('did-finish-load', openPendingOAuthCallback);
+     mainWindow.on('closed', () => { mainWindow = null; });
+-    mainWindow.loadURL(APP_URL).catch(error => console.error('Could not load GitHub Project Pusher:', error.message));
++    mainWindow.loadURL(APP_URL).catch(error => console.error('Could not load GitHub Pusher Studio:', error.message));
+   }
+ 
+   app.whenReady().then(() => {
+diff --git a/public/app.js b/public/app.js
+index 171e967..c35e430 100644
+--- a/public/app.js
++++ b/public/app.js
+@@ -8,32 +8,33 @@ const apiUrl = path => new URL(path.replace(/^\/+/, ''), API_ORIGIN.replace(/\/+
+ let projects=[];let selectedId=null;let deferredInstall=null;let refreshPromise=null;let repositoryCache=null;let repositoryCacheExpires=0;let repositoryRequest=null;const historyCache=new Map();
+ const $=id=>document.getElementById(id);
+ let toastTimer;
++let pushController=null;
+ 
+ const toast=(msg)=>{const t=$('toast');t.textContent=msg;t.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>t.classList.remove('show'),Math.max(3600,String(msg).length*60))};
+ async function withBusy(button,label,action){if(button.disabled)return;const original=button.dataset.idleLabel||button.textContent;const wasDisabled=button.disabled;button.dataset.idleLabel=original;button.disabled=true;button.classList.add('is-loading');button.setAttribute('aria-busy','true');button.textContent=label;try{return await action()}finally{button.textContent=original;button.disabled=wasDisabled;button.classList.remove('is-loading');button.removeAttribute('aria-busy')}}
+ async function api(url,opts={}){const headers=new Headers(opts.headers||{});const token=getToken();if(token)headers.set('Authorization',`Bearer ${token}`);const r=await fetch(apiUrl(url),{credentials:'include',...opts,headers});if(!r.ok){let d={};try{d=await r.json()}catch{}const err=new Error(d.error||`Request failed (${r.status})`);err.status=r.status;err.code=d.code;err.details=d.details;throw err}return r.json()}
+ function render(){const q=$('search').value.trim().toLowerCase();const list=projects.filter(p=>p.name.toLowerCase().includes(q));$('projectSummary').textContent=`${projects.length} project${projects.length===1?'':'s'}`;$('projectList').innerHTML=list.map(p=>{let changeBadge='';if(p.lastGithubChangeAt&&p.lastLocalChangeAt){const last=p.lastGithubChangeAt>p.lastLocalChangeAt?'🌐 GitHub':'📝 Local';changeBadge=` · ${last} ${formatDate(Math.max(p.lastGithubChangeAt,p.lastLocalChangeAt))}`}else if(p.lastGithubChangeAt){changeBadge=` · 🌐 GitHub ${formatDate(p.lastGithubChangeAt)}`}else if(p.lastLocalChangeAt){changeBadge=` · 📝 Local ${formatDate(p.lastLocalChangeAt)}`}let syncLabel=p.syncState||'local';let syncClass='';if(p.syncState==='conflict'){syncClass='conflict'}else if(p.syncState==='error'){syncClass='error';syncLabel='⚠ '+syncLabel}else if(p.syncState==='warning'){syncClass='conflict';syncLabel='⚠ '+syncLabel}return`<div class="project-row ${p.id===selectedId?'selected':''}" data-id="${p.id}"><div class="project-icon">⌁</div><div class="project-main"><div class="project-name">${escapeHtml(p.name)}</div><div class="project-meta">${p.files||0} files · ${p.repoFullName||'Local only'}${changeBadge}</div></div><span class="state ${syncClass}">${escapeHtml(syncLabel)}</span></div>`}).join('');$('empty').classList.remove('loading-message');$('empty').textContent=q?'No projects match your search.':'No projects yet. Add a folder or select some code files.';$('empty').hidden=list.length>0||(!q&&projects.length>0);document.querySelectorAll('.project-row').forEach(x=>x.onclick=()=>selectProject(x.dataset.id));renderDetails()}
+-function renderDetails(){const p=projects.find(x=>x.id===selectedId);const has=!!p;$('details').hidden=!has;$('detailsEmpty').hidden=has;$('pushBtn').disabled=!has;$('fetchBtn').disabled=!(has&&p?.repoFullName);$('removeBtn').disabled=!has;if(!has){$('snapshotList').innerHTML='';return}const localChange=p.lastLocalChangeAt?`<span class="change-source local">📝 Local</span> ${formatDate(p.lastLocalChangeAt)}`:'—';const githubChange=p.lastGithubChangeAt?`<span class="change-source github">🌐 GitHub</span> ${formatDate(p.lastGithubChangeAt)}`:'—';$('details').innerHTML=`<dl><dt>Name</dt><dd>${escapeHtml(p.name)}</dd><dt>Files</dt><dd>${p.files||0}</dd><dt>GitHub</dt><dd>${p.repoFullName?`<a href="${p.repoUrl}" target="_blank" rel="noreferrer">${escapeHtml(p.repoFullName)}</a>`:'Not connected'}</dd><dt>Branch</dt><dd>${escapeHtml(p.branch||'—')}</dd><dt>Sync</dt><dd>${escapeHtml(p.syncMessage||'—')}</dd><dt>Last local change</dt><dd>${localChange}</dd><dt>Last GitHub change</dt><dd>${githubChange}</dd><dt>Last push</dt><dd>${p.lastPushedAt?formatDate(p.lastPushedAt):'—'}</dd><dt>Last pull</dt><dd>${p.lastSyncAt?formatDate(p.lastSyncAt):'—'}</dd></dl>`;loadHistory(p.id)}
+-async function selectProject(id){selectedId=id;render()}
++function renderDetails(){const p=projects.find(x=>x.id===selectedId);const has=!!p;$('details').hidden=!has;$('detailsEmpty').hidden=has;$('openBtn').disabled=!has;$('pushBtn').disabled=!has;$('fetchBtn').disabled=!(has&&p?.repoFullName);$('removeBtn').disabled=!has;if(!has){$('snapshotList').innerHTML='';return}const localChange=p.lastLocalChangeAt?`<span class="change-source local">📝 Local</span> ${formatDate(p.lastLocalChangeAt)}`:'—';const githubChange=p.lastGithubChangeAt?`<span class="change-source github">🌐 GitHub</span> ${formatDate(p.lastGithubChangeAt)}`:'—';$('details').innerHTML=`<dl><dt>Name</dt><dd>${escapeHtml(p.name)}</dd><dt>Files</dt><dd>${p.files||0}</dd><dt>GitHub</dt><dd>${p.repoFullName?`<a href="${p.repoUrl}" target="_blank" rel="noreferrer">${escapeHtml(p.repoFullName)}</a>`:'Not connected'}</dd><dt>Branch</dt><dd>${escapeHtml(p.branch||'—')}</dd><dt>Sync</dt><dd>${escapeHtml(p.syncMessage||'—')}</dd><dt>Last local change</dt><dd>${localChange}</dd><dt>Last GitHub change</dt><dd>${githubChange}</dd><dt>Last push</dt><dd>${p.lastPushedAt?formatDate(p.lastPushedAt):'—'}</dd><dt>Last pull</dt><dd>${p.lastSyncAt?formatDate(p.lastSyncAt):'—'}</dd></dl>`;loadHistory(p.id)}
++async function selectProject(id){if(id!==selectedId&&window.projectEditor&&!window.projectEditor.prepareLeave())return;selectedId=id;window.projectEditor?.selectionChanged(id);render()}
+ 
+ 
+ function formatBytes(n){if(n<1024)return `${n} B`;if(n<1024*1024)return `${(n/1024).toFixed(1)} KB`;if(n<1024*1024*1024)return `${(n/1024/1024).toFixed(1)} MB`;return `${(n/1024/1024/1024).toFixed(1)} GB`}
+ function renderDownloads(items, targetId){const el=$(targetId);if(!el)return;const groups={windows:[],macos:[],android:[],linux:[]};for(const item of items){if(groups[item.platform])groups[item.platform].push(item)}const cards=[];for(const platform of ['windows','macos','android','linux']){const label={windows:'Windows',macos:'macOS',android:'Android',linux:'Linux'}[platform];for(const item of groups[platform]){const href=apiUrl(item.url);cards.push(`<div class="download-card"><div><div class="download-title">${label}</div><div class="download-meta">${escapeHtml(item.name)} · ${formatBytes(item.size)} · ${formatDate(item.modifiedAt)}</div></div><a class="secondary" href="${href}">Download</a></div>`)}}el.innerHTML=cards.length?cards.join(''):'<div class="muted download-empty">No app builds are available yet.</div>'}
+ async function loadApplications(){try{const items=await api('/api/applications');renderDownloads(items,'downloadList');renderDownloads(items,'downloadListApp')}catch(e){const error=`<div class="muted download-empty">Downloads are temporarily unavailable. ${escapeHtml(e.message)}</div>`;for(const id of ['downloadList','downloadListApp'])if($(id))$(id).innerHTML=error;throw e}}
+-async function load(){const [meResult,applicationsResult]=await Promise.allSettled([api('/api/auth/me'),loadApplications()]);if(applicationsResult.status==='rejected')toast(`Could not load downloads: ${applicationsResult.reason.message}`);if(meResult.status==='rejected')throw meResult.reason;const me=meResult.value;$('authView').hidden=me.authenticated;$('publicDownloads').hidden=me.authenticated;$('appView').hidden=!me.authenticated;if(!me.authenticated)return;$('userBox').innerHTML=`<span class="muted">@${escapeHtml(me.user.login)}</span> <button class="ghost" id="logout">Sign out</button>`;$('logout').onclick=async()=>{try{await withBusy($('logout'),'Signing out…',()=>api('/api/auth/logout',{method:'POST'}));tokenStore.removeItem('gpp_access_token');location.reload()}catch(e){toast(e.message)}};try{await refresh()}catch(e){toast(`Could not load projects: ${e.message}`)}connectEvents()}
++async function load(){const [meResult,applicationsResult]=await Promise.allSettled([api('/api/auth/me'),loadApplications()]);if(applicationsResult.status==='rejected')toast(`Could not load downloads: ${applicationsResult.reason.message}`);if(meResult.status==='rejected')throw meResult.reason;const me=meResult.value;$('authView').hidden=me.authenticated;$('publicDownloads').hidden=me.authenticated;$('appView').hidden=!me.authenticated;if(!me.authenticated)return;$('userBox').innerHTML=`<span class="muted">@${escapeHtml(me.user.login)}</span> <button class="ghost" id="logout">Sign out</button>`;$('logout').onclick=async()=>{if(window.projectEditor&&!window.projectEditor.prepareLeave())return;try{await withBusy($('logout'),'Signing out…',()=>api('/api/auth/logout',{method:'POST'}));tokenStore.removeItem('gpp_access_token');location.reload()}catch(e){toast(e.message)}};try{await refresh()}catch(e){toast(`Could not load projects: ${e.message}`)}connectEvents()}
+ async function refresh(){if(refreshPromise)return refreshPromise;refreshPromise=(async()=>{try{projects=await api('/api/projects');if(selectedId&&!projects.some(p=>p.id===selectedId))selectedId=null;render()}catch(e){$('projectSummary').textContent='Unable to refresh';$('empty').classList.remove('loading-message');$('empty').textContent=`Could not load projects. ${e.message}`;$('empty').hidden=false;throw e}})();try{return await refreshPromise}finally{refreshPromise=null}}
+ async function loadHistory(id,force=false){if(!force&&historyCache.has(id)){$('snapshotList').innerHTML=historyCache.get(id);return}if($('snapshotList').dataset.loadingId===id)return;$('snapshotList').dataset.loadingId=id;$('snapshotList').innerHTML='<div class="muted loading-message">Loading snapshots…</div>';try{const h=await api(`/api/projects/${id}/history`);const markup=h.length?h.map(x=>`<div class="snap"><strong>${escapeHtml(x.label||'snapshot')}</strong><span>${escapeHtml(x.createdAt||'')}</span></div>`).join(''):'<div class="muted">No snapshots yet.</div>';historyCache.set(id,markup);if(selectedId===id)$('snapshotList').innerHTML=markup}catch(e){if(selectedId===id)$('snapshotList').innerHTML=`<div class="muted">Could not load snapshots. ${escapeHtml(e.message)}</div>`}finally{if($('snapshotList').dataset.loadingId===id)delete $('snapshotList').dataset.loadingId}}
+ async function connectEvents(){try{const t=await api('/api/events/ticket',{method:'GET'});const es=new EventSource(apiUrl(`/api/events?ticket=${encodeURIComponent(t.ticket)}`));es.onopen=()=>{$('liveDot').style.background='#22c55e';$('liveText').textContent='Live sync connected'};es.onerror=()=>{$('liveDot').style.background='#ef4444';$('liveText').textContent='Reconnecting…'};es.onmessage=e=>{const d=JSON.parse(e.data);if(d.projectId)historyCache.delete(d.projectId);if(d.type==='project-updated'||d.type==='projects-changed'){refresh().catch(error=>toast(`Refresh failed: ${error.message}`))}else if(d.type==='sync-conflict'){toast('Remote changes found; local edits were kept safe.');refresh().catch(error=>toast(`Refresh failed: ${error.message}`))}else if(d.type==='sync-error'){toast('A sync error occurred. Check the project status.');refresh().catch(error=>toast(`Refresh failed: ${error.message}`))}}}catch(e){$('liveDot').style.background='#ef4444';$('liveText').textContent=`Live sync unavailable: ${e.message}`}}
+ async function addProject(){const folderFiles=[...($('folderInput').files||[])];const files=[...folderFiles,...($('fileInput').files||[])];if(!files.length){toast('Choose a folder or files first.');return}if(folderFiles.some(f=>!f.webkitRelativePath)){toast('This browser did not keep the folder structure of the selected folder, so files from different subfolders would be mixed together. Nothing was uploaded. Try again from a desktop browser such as Chrome, Edge or Firefox.');return}const entries=files.map(f=>({path:f.webkitRelativePath||f.name,size:f.size}));const seen=new Set();const dup=entries.find(e=>seen.has(e.path)||!seen.add(e.path));if(dup){toast(`Two selected files have the same path "${dup.path}". Nothing was uploaded.`);return}const fd=new FormData();fd.append('projectName',$('projectName').value);fd.append('manifest',JSON.stringify(entries));files.forEach((f,i)=>fd.append('files',f,entries[i].path));try{await withBusy($('saveProject'),'Uploading…',async()=>{const p=await api('/api/projects',{method:'POST',body:fd});selectedId=p.id;historyCache.delete(p.id);const fileNote=` (${files.length} of ${files.length} selected files received)`;const syncNote=p.syncMessage&&p.syncMessage!=='Stored in persistent cloud storage.'?' '+p.syncMessage:'';toast(`Project added to your persistent cloud library.${fileNote}${syncNote}`);$('addDialog').close();$('folderInput').value='';$('fileInput').value='';$('projectName').value='';await refresh()})}catch(e){console.error('Add project failed:',e);$('addDialog').close();toast(e.message)}}
+ async function loadRepositories(){if(repositoryCache&&Date.now()<repositoryCacheExpires)return repositoryCache;if(repositoryRequest)return repositoryRequest;repositoryRequest=api('/api/github/repos').then(repos=>{repositoryCache=repos;repositoryCacheExpires=Date.now()+120000;return repos}).finally(()=>{repositoryRequest=null});return repositoryRequest}
+-async function openPush(){const p=projects.find(x=>x.id===selectedId);if(!p)return;$('pushProjectName').textContent=p.name;$('newRepoName').value=p.repoFullName?.split('/')[1]||p.name;$('branch').value=p.branch||'main';$('repoSelect').disabled=true;$('repoSelect').innerHTML='<option value="">Loading repositories…</option>';toggleNewRepo();$('pushDialog').showModal();try{const repos=await loadRepositories();$('repoSelect').innerHTML='<option value="">＋ Create a new repository</option>'+repos.map(r=>`<option value="${r.id}" data-branch="${escapeHtml(r.default_branch||'main')}">${escapeHtml(r.full_name)}${r.private?' 🔒':''}</option>`).join('');$('repoSelect').disabled=false;toggleNewRepo()}catch(e){$('repoSelect').innerHTML='<option value="">Could not load repositories</option>';toast(`Could not load GitHub repositories: ${e.message}`)}}
++async function openPush(){const p=projects.find(x=>x.id===selectedId);if(!p||pushController)return;if(window.projectEditor&&!window.projectEditor.requireSaved(p.id))return;$('pushProjectName').textContent=p.name;$('newRepoName').value=p.repoFullName?.split('/')[1]||p.name;$('branch').value=p.branch||'main';$('repoSelect').disabled=true;$('repoSelect').innerHTML='<option value="">Loading repositories…</option>';toggleNewRepo();$('pushDialog').showModal();try{const repos=await loadRepositories();$('repoSelect').innerHTML='<option value="">＋ Create a new repository</option>'+repos.map(r=>`<option value="${r.id}" data-branch="${escapeHtml(r.default_branch||'main')}">${escapeHtml(r.full_name)}${r.private?' 🔒':''}</option>`).join('');$('repoSelect').disabled=false;const linked=repos.find(r=>String(r.id)===String(p.repoId)||r.full_name===p.repoFullName);if(linked)$('repoSelect').value=String(linked.id);toggleNewRepo();if(linked)$('branch').value=p.branch||linked.default_branch||'main'}catch(e){$('repoSelect').innerHTML='<option value="">Could not load repositories</option>';toast(`Could not load GitHub repositories: ${e.message}`)}}
+ function toggleNewRepo(){const newOne=!$('repoSelect').value;$('newRepoRow').hidden=!newOne;$('visibilityRow').hidden=!newOne;if(!newOne){const opt=$('repoSelect').selectedOptions[0];$('branch').value=opt?.dataset.branch||'main'}}
+-async function push(){const p=projects.find(x=>x.id===selectedId);if(!p)return;if($('repoSelect').disabled){toast('Please wait for the GitHub repository list to finish loading.');return}const repoId=$('repoSelect').value;const body={projectId:p.id,repoId:repoId||null,repoName:$('newRepoName').value,visibility:$('visibility').value,branch:$('branch').value.trim()||'main'};const send=()=>api('/api/github/push',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});try{await withBusy($('confirmPush'),'Pushing…',async()=>{let r;try{r=await send()}catch(e){if(e.code!=='CONFLICT'||!e.details)throw e;const list=e.details.conflicts.join('\n')+(e.details.total>e.details.conflicts.length?`\n…and ${e.details.total-e.details.conflicts.length} more`:'');if(!confirm(`${e.message}\n\n${list}\n\nOverwrite the GitHub versions of these files with yours? Cancel leaves GitHub unchanged.`))throw e;body.conflictResolution='keep-local';r=await send()}historyCache.delete(p.id);const where=`${r.repo.full_name}`;let msg=r.outcome==='no-changes'?`${where} already has these files; nothing to push.`:`Pushed to ${where}.`;if(r.restoredFromGitHub)msg+=` Kept ${r.restoredFromGitHub} file(s) from GitHub.`;if(r.overwritten&&r.overwritten.length)msg+=` Overwrote ${r.overwritten.length} file(s) on GitHub.`;if(r.skippedSpecial&&r.skippedSpecial.length)msg+=` ${r.skippedSpecial.length} symbolic link(s) or submodule(s) on GitHub were left unchanged.`;if(r.warnings&&r.warnings.length)msg+=` Warning: ${r.warnings.join(' ')}`;toast(msg);$('pushDialog').close();await refresh()})}catch(e){console.error('Push failed:',e);$('pushDialog').close();toast(`Push failed: ${e.message}`);await refresh().catch(()=>{})}}
+-async function fetchChanges(){const p=projects.find(x=>x.id===selectedId);if(!p||!p.repoFullName){toast('Select a project connected to a GitHub repository.');return}try{await withBusy($('fetchBtn'),'Fetching…',async()=>{const result=await api('/api/github/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId:p.id})});historyCache.delete(p.id);if(result.project&&result.project.syncState==='error'){toast('Fetch completed with errors: '+result.project.syncMessage)}else{toast('Fetched latest changes from GitHub.')}await refresh()})}catch(e){console.error('Fetch failed:',e);toast('Fetch failed: '+e.message)}}
+-async function removeProject(){const p=projects.find(x=>x.id===selectedId);if(!p||!confirm(`Remove ${p.name} from your project library? This removes the persistent cloud copy and snapshots, not the GitHub repo.`))return;try{await withBusy($('removeBtn'),'Removing…',async()=>{await api(`/api/projects/${p.id}`,{method:'DELETE'});historyCache.delete(p.id);selectedId=null;toast('Project removed.');await refresh()})}catch(e){toast(e.message)}}
++async function push(){const p=projects.find(x=>x.id===selectedId);if(!p||pushController)return;if(window.projectEditor&&!window.projectEditor.requireSaved(p.id))return;if($('repoSelect').disabled){toast('Please wait for the GitHub repository list to finish loading.');return}const repoId=$('repoSelect').value;const body={projectId:p.id,repoId:repoId||null,repoName:$('newRepoName').value,visibility:$('visibility').value,branch:$('branch').value.trim()||'main',commitMessage:$('commitMessage').value};pushController=new AbortController();const signal=pushController.signal;const send=()=>api('/api/github/push',{method:'POST',signal,headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});try{await withBusy($('confirmPush'),'Pushing…',async()=>{let r;try{r=await send()}catch(e){if(e.code!=='CONFLICT'||!e.details)throw e;const list=e.details.conflicts.join('\n')+(e.details.total>e.details.conflicts.length?`\n…and ${e.details.total-e.details.conflicts.length} more`:'');if(!confirm(`${e.message}\n\n${list}\n\nOverwrite the GitHub versions of these files with yours? Cancel leaves GitHub unchanged.`))throw e;body.conflictResolution='keep-local';r=await send()}historyCache.delete(p.id);const where=`${r.repo.full_name}`;let msg=r.outcome==='no-changes'?`${where} already has these files; nothing to push.`:`Pushed to ${where}.`;if(r.restoredFromGitHub)msg+=` Kept ${r.restoredFromGitHub} file(s) from GitHub.`;if(r.overwritten&&r.overwritten.length)msg+=` Overwrote ${r.overwritten.length} file(s) on GitHub.`;if(r.skippedSpecial&&r.skippedSpecial.length)msg+=` ${r.skippedSpecial.length} symbolic link(s) or submodule(s) on GitHub were left unchanged.`;if(r.warnings&&r.warnings.length)msg+=` Warning: ${r.warnings.join(' ')}`;toast(msg);$('commitMessage').value='';$('pushDialog').close();await refresh();await window.projectEditor?.reloadAfterSync(p.id)})}catch(e){console.error('Push failed:',e);$('pushDialog').close();toast(e.name==='AbortError'?'Push cancellation requested. Check the project status before retrying.':`Push failed: ${e.message}`);await refresh().catch(()=>{})}finally{pushController=null}}
++async function fetchChanges(){const p=projects.find(x=>x.id===selectedId);if(!p||!p.repoFullName){toast('Select a project connected to a GitHub repository.');return}if(window.projectEditor&&!window.projectEditor.requireSaved(p.id))return;try{await withBusy($('fetchBtn'),'Fetching…',async()=>{const result=await api('/api/github/fetch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({projectId:p.id})});historyCache.delete(p.id);if(result.project&&result.project.syncState==='error'){toast('Fetch completed with errors: '+result.project.syncMessage)}else if(result.project?.syncState==='conflict'){toast('Fetch found conflicting changes. Your saved edits are kept safe. Review the project status.')}else{toast('Fetched latest changes from GitHub.')}await refresh();await window.projectEditor?.reloadAfterSync(p.id)})}catch(e){console.error('Fetch failed:',e);toast('Fetch failed: '+e.message)}}
++async function removeProject(){const p=projects.find(x=>x.id===selectedId);if(!p)return;if(window.projectEditor&&!window.projectEditor.prepareLeave())return;if(!confirm(`Remove ${p.name} from your project library? This removes the persistent cloud copy and snapshots, not the GitHub repo.`))return;try{await withBusy($('removeBtn'),'Removing…',async()=>{await api(`/api/projects/${p.id}`,{method:'DELETE'});historyCache.delete(p.id);selectedId=null;window.projectEditor?.selectionChanged(null);toast('Project removed.');await refresh()})}catch(e){toast(e.message)}}
+ function install(){if(deferredInstall){deferredInstall.prompt();deferredInstall.userChoice.finally(()=>{deferredInstall=null})}else toast('Use your browser menu → Install app / Add to Home screen.')}
+ 
+ 
+ function escapeHtml(s){return String(s??'').replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}function formatDate(s){try{return new Date(s).toLocaleString()}catch{return s}}
+-$('addBtn').onclick=()=>$('addDialog').showModal();$('addForm').onsubmit=e=>{e.preventDefault();addProject()};$('pushBtn').onclick=openPush;$('pushForm').onsubmit=e=>{e.preventDefault();push()};$('fetchBtn').onclick=fetchChanges;$('repoSelect').onchange=toggleNewRepo;$('removeBtn').onclick=removeProject;$('refreshBtn').onclick=()=>withBusy($('refreshBtn'),'Refreshing…',refresh).catch(e=>toast(`Refresh failed: ${e.message}`));$('search').oninput=render;$('folderInput').onchange=updateCount;$('fileInput').onchange=updateCount;$('installBtn').onclick=install;$('installBtn2').onclick=install;function updateCount(){const n=($('folderInput').files?.length||0)+($('fileInput').files?.length||0);$('addCount').textContent=`${n} file${n===1?'':'s'} selected`}
++$('openBtn').onclick=()=>{const p=projects.find(x=>x.id===selectedId);if(p)window.projectEditor?.openProject(p)};$('cancelAdd').onclick=()=>$('addDialog').close();$('cancelPush').onclick=()=>{pushController?.abort();$('pushDialog').close()};$('pushDialog').addEventListener('cancel',()=>pushController?.abort());$('addBtn').onclick=()=>$('addDialog').showModal();$('addForm').onsubmit=e=>{e.preventDefault();addProject()};$('pushBtn').onclick=openPush;$('pushForm').onsubmit=e=>{e.preventDefault();push()};$('fetchBtn').onclick=fetchChanges;$('repoSelect').onchange=toggleNewRepo;$('removeBtn').onclick=removeProject;$('refreshBtn').onclick=()=>withBusy($('refreshBtn'),'Refreshing…',refresh).catch(e=>toast(`Refresh failed: ${e.message}`));$('search').oninput=render;$('folderInput').onchange=updateCount;$('fileInput').onchange=updateCount;$('installBtn').onclick=install;$('installBtn2').onclick=install;function updateCount(){const n=($('folderInput').files?.length||0)+($('fileInput').files?.length||0);$('addCount').textContent=`${n} file${n===1?'':'s'} selected`}
+ const loginLink=$('loginLink');if(loginLink)loginLink.href='login.html';window.addEventListener('beforeinstallprompt',e=>{e.preventDefault();deferredInstall=e;$('installBtn').hidden=false});window.addEventListener('appinstalled',()=>{$('installBtn').hidden=true;toast('App installed.')});if('serviceWorker' in navigator)navigator.serviceWorker.register(new URL('sw.js',document.baseURI)).catch(()=>{});load().catch(e=>toast(e.message));
+diff --git a/public/editor.js b/public/editor.js
+new file mode 100644
+index 0000000..122f135
+--- /dev/null
++++ b/public/editor.js
+@@ -0,0 +1,199 @@
++// Uses the existing authenticated API and stored project workspace; never commits automatically.
++(() => {
++  let projectId = null;
++  let folder = '';
++  let file = null;
++  let busy = false;
++  const area = $('codeEditor');
++  const normalized = text => text.replace(/\r\n?/g, '\n');
++  const dirty = () => Boolean(file && area.value !== normalized(file.content));
++  const mayDiscard = () => !dirty() || confirm('Discard the unsaved edits in this file? Save first to keep them.');
++
++  function updateControls() {
++    $('editorDirty').hidden = !dirty();
++    $('editorSave').disabled = busy || !dirty();
++    $('editorReload').disabled = busy;
++    $('editorClose').disabled = busy;
++    $('folderUp').disabled = busy || !folder;
++    $('folderRoot').disabled = busy || !folder;
++    area.readOnly = busy;
++  }
++
++  async function task(action) {
++    if (busy) { toast('Wait for the editor to finish its current operation.'); return false; }
++    busy = true;
++    $('workspaceEditor').setAttribute('aria-busy', 'true');
++    updateControls();
++    try { await action(); return true; }
++    catch (e) {
++      $('editorStatus').textContent = e.message;
++      toast(e.message);
++      return false;
++    } finally {
++      busy = false;
++      $('workspaceEditor').removeAttribute('aria-busy');
++      updateControls();
++    }
++  }
++
++  function resetFile() {
++    file = null;
++    area.value = '';
++    area.hidden = true;
++    $('editorFileName').textContent = 'Select a file';
++    $('editorStatus').textContent = 'Open a text file to start editing. Binary files and files over 2 MiB are kept unchanged.';
++    $('editorPosition').textContent = 'UTF-8';
++    updateControls();
++  }
++
++  async function listFolder(relative) {
++    const data = await api(`/api/projects/${projectId}/files?path=${encodeURIComponent(relative)}`);
++    folder = data.path;
++    $('folderPath').textContent = folder || '/';
++    const container = $('fileList');
++    container.replaceChildren();
++    if (!data.entries.length) {
++      const empty = document.createElement('p');
++      empty.className = 'muted';
++      empty.textContent = 'This folder is empty.';
++      container.append(empty);
++    }
++    for (const entry of data.entries) {
++      const button = document.createElement('button');
++      button.type = 'button';
++      button.className = 'file-entry';
++      button.dataset.path = entry.path;
++      const name = document.createElement('span');
++      name.textContent = `${entry.type === 'directory' ? '▸ 📁' : '·'} ${entry.name}`;
++      button.append(name);
++      if (entry.type === 'file') {
++        const size = document.createElement('small');
++        size.textContent = formatBytes(entry.size);
++        button.append(size);
++      }
++      button.title = entry.path;
++      button.onclick = () => {
++        if (busy) return;
++        if (entry.type === 'directory') task(() => listFolder(entry.path));
++        else if (mayDiscard()) task(() => openFile(entry.path));
++      };
++      container.append(button);
++    }
++    highlightFile();
++  }
++
++  function highlightFile() {
++    for (const button of $('fileList').querySelectorAll('.file-entry')) {
++      button.setAttribute('aria-current', button.dataset.path === file?.path ? 'true' : 'false');
++    }
++  }
++
++  async function openFile(relative) {
++    // Keep the current draft if the requested file is unreadable or the request fails.
++    const data = await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(relative)}`);
++    file = data;
++    area.value = normalized(data.content);
++    area.hidden = false;
++    $('editorFileName').textContent = data.path;
++    $('editorStatus').textContent = `${formatBytes(data.size)} · UTF-8 · Save updates your app workspace. Push Selected publishes to GitHub.`;
++    highlightFile();
++    updatePosition();
++  }
++
++  async function reload() {
++    const previous = file?.path;
++    await listFolder(folder);
++    if (previous) {
++      // Unsaved drafts have been explicitly discarded by the caller.
++      resetFile();
++      await openFile(previous);
++    }
++  }
++
++  async function openProject(project) {
++    if (busy || !mayDiscard()) return;
++    projectId = project.id;
++    folder = '';
++    resetFile();
++    $('editorProjectName').textContent = project.name;
++    $('workspaceEditor').hidden = false;
++    await task(() => listFolder(''));
++    $('workspaceEditor').scrollIntoView({ behavior: 'smooth', block: 'start' });
++  }
++
++  async function save() {
++    if (busy || !dirty()) return;
++    await task(async () => {
++      // Textareas normalize newlines. Retain the original file's CRLF/CR convention.
++      const eol = /\r\n/.test(file.content) && !/(^|[^\r])\n/.test(file.content) ? '\r\n' : /\r/.test(file.content) && !/\n/.test(file.content) ? '\r' : '\n';
++      const content = area.value.replace(/\n/g, eol);
++      const result = await api(`/api/projects/${projectId}/file`, {
++        method: 'POST', headers: { 'Content-Type': 'application/json' },
++        body: JSON.stringify({ path: file.path, content, sha: file.sha })
++      });
++      file = result;
++      $('editorStatus').textContent = result.changed ? 'Saved to your app workspace. Fetch Changes to check GitHub, then Push Selected when ready.' : 'No changes to save.';
++      historyCache.delete(projectId);
++      await refresh().catch(e => toast(`File saved. Project refresh failed: ${e.message}`));
++      await listFolder(folder);
++      toast('File saved.');
++    });
++  }
++
++  function updatePosition() {
++    const before = area.value.slice(0, area.selectionStart);
++    const lines = before.split('\n');
++    $('editorPosition').textContent = `Ln ${lines.length}, Col ${lines.at(-1).length + 1} · UTF-8`;
++  }
++
++  area.oninput = () => { updateControls(); updatePosition(); };
++  area.addEventListener('click', updatePosition);
++  area.addEventListener('keyup', updatePosition);
++  area.addEventListener('keydown', event => {
++    if (event.key === 'Tab' && !event.shiftKey) {
++      event.preventDefault();
++      if (busy) return;
++      area.setRangeText('  ', area.selectionStart, area.selectionEnd, 'end');
++      updateControls();
++      updatePosition();
++    }
++  });
++  $('editorSave').onclick = save;
++  $('editorReload').onclick = () => { if (mayDiscard()) task(reload); };
++  $('folderUp').onclick = () => task(() => listFolder(folder.split('/').slice(0, -1).join('/')));
++  $('folderRoot').onclick = () => task(() => listFolder(''));
++  $('editorClose').onclick = () => {
++    if (busy || !mayDiscard()) return;
++    resetFile();
++    projectId = null;
++    $('workspaceEditor').hidden = true;
++  };
++  window.addEventListener('beforeunload', event => {
++    if (dirty()) { event.preventDefault(); event.returnValue = ''; }
++  });
++  document.addEventListener('keydown', event => {
++    if (!projectId || !(event.ctrlKey || event.metaKey) || event.key.toLowerCase() !== 's') return;
++    event.preventDefault();
++    save();
++  });
++  window.projectEditor = {
++    openProject,
++    requireSaved(id) {
++      if (!projectId || projectId !== id) return true;
++      if (busy) { toast('Wait for the editor to finish its current operation.'); return false; }
++      if (dirty()) { toast('Save your file or discard the draft before fetching or pushing.'); return false; }
++      return true;
++    },
++    async reloadAfterSync(id) {
++      if (projectId !== id || dirty()) return;
++      await task(reload);
++    },
++    prepareLeave() { if (busy) return false; return mayDiscard(); },
++    selectionChanged(id) {
++      if (!projectId || projectId === id) return;
++      resetFile();
++      projectId = null;
++      $('workspaceEditor').hidden = true;
++    }
++  };
++})();
+diff --git a/public/index.html b/public/index.html
+index ca7018a..662ef63 100644
+--- a/public/index.html
++++ b/public/index.html
+@@ -4,7 +4,7 @@
+   <meta charset="utf-8" />
+   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+   <meta name="theme-color" content="#111827" />
+-  <meta name="description" content="Persistent GitHub project library and live sync dashboard." />
++  <meta name="description" content="Browse files, edit code, fetch changes and push projects with GitHub Pusher Studio." />
+   <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.onrender.com https://*.github.io http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com; worker-src 'self'">
+   <link rel="preconnect" href="https://fonts.googleapis.com" />
+   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+@@ -13,15 +13,15 @@
+   <link rel="icon" href="icons/icon.svg" />
+   <link rel="stylesheet" href="styles.css" />
+   <script src="theme.js"></script>
+-  <title>GitHub Project Pusher</title>
++  <title>GitHub Pusher Studio</title>
+ </head>
+ <body>
+   <header class="topbar">
+-    <a class="brand-lockup" href="./" aria-label="GitHub Project Pusher home">
++    <a class="brand-lockup" href="./" aria-label="GitHub Pusher Studio home">
+       <span class="brand-mark" aria-hidden="true">⌁</span>
+       <span>
+-        <span class="brand">GitHub Project Pusher</span>
+-        <span class="sub">Project library · GitHub sync · installable app</span>
++        <span class="brand">GitHub Pusher Studio</span>
++        <span class="sub">Browse · Edit · Sync · Push</span>
+       </span>
+     </a>
+     <div class="top-actions">
+@@ -67,8 +67,8 @@
+       <div class="workspace-heading">
+         <div>
+           <span class="eyebrow">YOUR WORKSPACE</span>
+-          <h1>Projects, in sync.</h1>
+-          <p>Manage your project library and keep every push safe.</p>
++          <h1>Your code. Your workspace.</h1>
++          <p>Open your projects, edit files, and publish changes when you are ready.</p>
+         </div>
+         <span class="workspace-badge">
+           <span class="dot" aria-hidden="true"></span>Cloud workspace
+@@ -79,6 +79,7 @@
+       <div class="toolbar card">
+         <div class="toolbar-left">
+           <button id="addBtn" class="primary">＋ Add Project</button>
++          <button id="openBtn" class="secondary" disabled>⌘ Open Selected</button>
+           <button id="pushBtn" class="secondary" disabled>↥ Push Selected</button>
+           <button id="fetchBtn" class="secondary" disabled>⇩ Fetch Changes</button>
+           <button id="removeBtn" class="danger" disabled>Remove</button>
+@@ -110,6 +111,42 @@
+         </aside>
+       </div>
+ 
++      <section id="workspaceEditor" class="card studio" aria-labelledby="editorHeading" hidden>
++        <div class="section-head studio-heading">
++          <div>
++            <span class="eyebrow">PUSHER STUDIO</span>
++            <h2 id="editorHeading">Project editor</h2>
++            <p id="editorProjectName"></p>
++          </div>
++          <div class="studio-actions">
++            <button id="editorReload" class="ghost" type="button">Reload files</button>
++            <button id="editorClose" class="ghost" type="button">Close editor</button>
++          </div>
++        </div>
++        <p class="studio-note">Save to your app workspace, fetch the latest GitHub changes, then Push Selected when ready. The folder originally uploaded from your device is unchanged.</p>
++        <div class="studio-grid">
++          <nav class="file-explorer" aria-label="Project files">
++            <div class="explorer-location">
++              <button id="folderUp" class="ghost" type="button" aria-label="Parent folder" disabled>↑</button>
++              <button id="folderRoot" class="ghost" type="button">Root</button>
++              <span id="folderPath" class="file-path">/</span>
++            </div>
++            <div id="fileList" class="file-list" aria-live="polite"></div>
++          </nav>
++          <div class="code-pane">
++            <div class="code-toolbar">
++              <span id="editorFileName" class="file-path">Select a file</span>
++              <span id="editorDirty" class="state" hidden>Unsaved</span>
++              <button id="editorSave" class="primary" type="button" disabled>Save file</button>
++            </div>
++            <p id="editorStatus" class="editor-status" role="status">Open a text file to start editing. Binary files and files over 2 MiB are kept unchanged.</p>
++            <label class="sr-only" for="codeEditor">File contents</label>
++            <textarea id="codeEditor" class="code-editor" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="editorStatus" hidden></textarea>
++            <div class="editor-footer"><span id="editorPosition">UTF-8</span><span>Ctrl / ⌘ + S to save</span></div>
++          </div>
++        </div>
++      </section>
++
+       <!-- Snapshots -->
+       <section class="card snapshots">
+         <div class="section-head">
+@@ -165,7 +202,7 @@
+       </div>
+       <div id="addCount" class="muted">0 files selected</div>
+       <div class="dialog-actions">
+-        <button class="ghost" value="cancel">Cancel</button>
++        <button id="cancelAdd" class="ghost" type="button">Cancel</button>
+         <button id="saveProject" class="primary" type="submit">Add Project</button>
+       </div>
+     </form>
+@@ -197,9 +234,14 @@
+         Branch
+         <input id="branch" value="main" />
+       </label>
+-      <div class="warning">If the selected repository has existing content, your local files will be merged with it. Local files take priority on conflicts.</div>
++      <label>
++        Commit message <span class="muted">(optional)</span>
++        <textarea id="commitMessage" rows="3" maxlength="5000" placeholder="Describe your changes…" aria-describedby="commitMessageHint"></textarea>
++      </label>
++      <small id="commitMessageHint" class="muted">Leave blank to use the automatic timestamped message. Unchanged files create no new commit.</small>
++      <div class="warning">Files from GitHub are preserved. If the same file changed in both places, you will be asked before replacing the GitHub version.</div>
+       <div class="dialog-actions">
+-        <button class="ghost" value="cancel">Cancel</button>
++        <button id="cancelPush" class="ghost" type="button">Cancel</button>
+         <button id="confirmPush" class="primary" type="submit">Push</button>
+       </div>
+     </form>
+@@ -210,5 +252,6 @@
+ 
+   <script src="config.js"></script>
+   <script src="app.js"></script>
++  <script src="editor.js"></script>
+ </body>
+ </html>
+diff --git a/public/login.html b/public/login.html
+index 4df9328..4136baf 100644
+--- a/public/login.html
++++ b/public/login.html
+@@ -5,7 +5,7 @@
+ <meta name="viewport" content="width=device-width,initial-scale=1">
+ <meta name="theme-color" content="#111827">
+ <meta name="referrer" content="no-referrer">
+-<meta name="description" content="Sign in to GitHub Project Pusher with your GitHub account.">
++<meta name="description" content="Sign in to GitHub Pusher Studio with your GitHub account.">
+ <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.onrender.com https://*.github.io http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com">
+ <link rel="preconnect" href="https://fonts.googleapis.com" />
+ <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+@@ -13,7 +13,7 @@
+ <link rel="icon" href="icons/icon.svg">
+ <link rel="stylesheet" href="login.css">
+ <script src="theme.js"></script>
+-<title>GitHub Project Pusher — Sign In</title>
++<title>GitHub Pusher Studio — Sign In</title>
+ </head>
+ <body>
+   <div class="theme-toggle">
+@@ -28,7 +28,7 @@
+   </div>
+ <main>
+   <div class="orb" aria-hidden="true">⌁</div>
+-  <h1>GitHub Project Pusher</h1>
++  <h1>GitHub Pusher Studio</h1>
+   <p id="status" class="muted">Your projects, always with you. Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p>
+   <div id="setup" class="hidden">
+     <p class="muted">GitHub Pages hosts the frontend separately from the free backend. Enter your backend URL once to connect.</p>
+diff --git a/public/manifest.webmanifest b/public/manifest.webmanifest
+index 0b4a164..5a81ded 100644
+--- a/public/manifest.webmanifest
++++ b/public/manifest.webmanifest
+@@ -1,11 +1,11 @@
+ {
+-  "name": "GitHub Project Pusher",
+-  "short_name": "Project Pusher",
++  "name": "GitHub Pusher Studio",
++  "short_name": "Pusher Studio",
+   "start_url": "./",
+   "display": "standalone",
+   "background_color": "#0b1020",
+   "theme_color": "#111827",
+-  "description": "Persistent GitHub project library with automatic sync and one-click push.",
++  "description": "Browse, edit, sync and push your GitHub projects from one workspace.",
+   "icons": [
+     {"src":"./icons/icon-192.png","sizes":"192x192","type":"image/png","purpose":"any maskable"},
+     {"src":"./icons/icon-512.png","sizes":"512x512","type":"image/png","purpose":"any maskable"}
+diff --git a/public/styles.css b/public/styles.css
+index b52f30a..3fe2c64 100644
+--- a/public/styles.css
++++ b/public/styles.css
+@@ -63,6 +63,42 @@
+   box-sizing: border-box;
+ }
+ 
++/* Studio workspace shares the dashboard palette and responds to all three themes. */
++.studio { margin-top: 24px; padding: 24px; scroll-margin-top: 100px; overflow: hidden; }
++.studio-heading { flex-wrap: wrap; }
++.studio-actions { display: flex; gap: 8px; flex-wrap: wrap; }
++.studio-note { margin: 0 0 20px; color: var(--muted); font-size: 13px; line-height: 1.7; }
++.studio-grid { display: grid; grid-template-columns: minmax(190px, 26%) minmax(0, 1fr); border: 1px solid var(--line); border-radius: var(--radius-sm); overflow: hidden; }
++.file-explorer { min-width: 0; background: var(--panel-solid); border-right: 1px solid var(--line); }
++.explorer-location { display: flex; align-items: center; gap: 6px; padding: 10px; border-bottom: 1px solid var(--line); }
++.explorer-location button { padding: 6px 8px; }
++.file-path { min-width: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; }
++.file-list { max-height: 550px; overflow: auto; padding: 8px; }
++.file-list > p { padding: 12px; }
++.file-entry { width: 100%; display: flex; align-items: center; justify-content: space-between; gap: 10px; text-align: left; border: 0; border-radius: 8px; background: transparent; color: var(--text); padding: 10px; box-shadow: none; font-size: 13px; }
++.file-entry span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
++.file-entry small { flex-shrink: 0; color: var(--muted); font-size: 10px; }
++.file-entry:hover, .file-entry[aria-current="true"] { background: var(--accent-soft); color: var(--accent); transform: none; }
++.code-pane { display: flex; flex-direction: column; min-width: 0; background: var(--field); }
++.code-toolbar { display: flex; align-items: center; gap: 10px; padding: 12px; border-bottom: 1px solid var(--line); }
++.code-toolbar .file-path { flex: 1; }
++.code-toolbar button { flex-shrink: 0; }
++.editor-status { min-height: 42px; margin: 0; padding: 10px 14px; font-size: 12px; line-height: 1.6; color: var(--muted); }
++.code-editor { display: block; flex: 1; width: 100%; min-height: 420px; border: 0; border-radius: 0; padding: 18px; resize: vertical; white-space: pre; overflow: auto; color: var(--text); background: var(--field); font: 14px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }
++.code-editor:focus { outline: 2px solid var(--accent); outline-offset: -2px; box-shadow: none; }
++.editor-footer { display: flex; justify-content: space-between; gap: 12px; padding: 10px 14px; border-top: 1px solid var(--line); color: var(--muted); font-size: 11px; }
++#commitMessage { width: 100%; resize: vertical; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-xs); color: var(--text); background: var(--field); font: inherit; }
++#commitMessage:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
++@media (max-width: 700px) {
++  .studio { padding: 16px; scroll-margin-top: 150px; }
++  .studio-grid { grid-template-columns: minmax(0, 1fr); }
++  .file-explorer { border-right: 0; border-bottom: 1px solid var(--line); }
++  .file-list { max-height: 210px; }
++  .code-editor { min-height: 330px; font-size: 13px; }
++  .editor-footer { flex-wrap: wrap; }
++  .studio-actions { width: 100%; }
++}
++
+ body {
+   min-width: 320px;
+   min-height: 100vh;
+@@ -1364,3 +1400,12 @@ label {
+   animation: shimmer 1.5s ease-in-out infinite;
+   border-radius: var(--radius-xs);
+ }
++
++/* Keep the longer Studio name and theme selector legible on phones. */
++@media (max-width: 700px) {
++  .topbar { flex-wrap: wrap; gap: 10px; padding: 12px 14px; }
++  .brand-lockup { width: 100%; }
++  .top-actions { width: 100%; justify-content: space-between; }
++  .theme-control select { width: auto; min-width: 132px; height: auto; padding: 9px 30px 9px 11px; color: var(--text); }
++  .brand { font-size: 16px; }
++}
+diff --git a/public/sw.js b/public/sw.js
+index 7c04d52..7381c4d 100644
+--- a/public/sw.js
++++ b/public/sw.js
+@@ -1,7 +1,7 @@
+-const CACHE = 'gpp-shell-v7';
++const CACHE = 'gpp-shell-v8';
+ const base = new URL('./', self.registration.scope);
+ const asset = name => new URL(name, base).toString();
+-const ASSETS = ['index.html','login.html','manifest.webmanifest','config.js','app.js','login.js','theme.js','feedback.js','styles.css','login.css','icons/icon.svg','icons/icon-192.png','icons/icon-512.png'].map(asset);
++const ASSETS = ['index.html','login.html','manifest.webmanifest','config.js','app.js','editor.js','login.js','theme.js','feedback.js','styles.css','login.css','icons/icon.svg','icons/icon-192.png','icons/icon-512.png'].map(asset);
+ self.addEventListener('install', event => event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(ASSETS)).then(() => self.skipWaiting())));
+ self.addEventListener('activate', event => event.waitUntil(caches.keys().then(keys => Promise.all(keys.filter(key => key.startsWith('gpp-shell-') && key !== CACHE).map(key => caches.delete(key)))).then(() => self.clients.claim())));
+ self.addEventListener('fetch', event => {
+diff --git a/render.yaml b/render.yaml
+index 18774a6..c120b4d 100644
+--- a/render.yaml
++++ b/render.yaml
+@@ -37,7 +37,7 @@ services:
+       - key: MAX_SNAPSHOTS_PER_PROJECT
+         value: "10"
+       - key: APP_NAME
+-        value: GitHub Project Pusher
++        value: GitHub Pusher Studio
+       - key: PUBLIC_BASE_URL
+         sync: false
+       - key: FRONTEND_URL
+diff --git a/scripts/test-project-files.mjs b/scripts/test-project-files.mjs
+new file mode 100644
+index 0000000..2c7aac0
+--- /dev/null
++++ b/scripts/test-project-files.mjs
+@@ -0,0 +1,72 @@
++import { test } from 'node:test';
++import assert from 'node:assert/strict';
++import fs from 'node:fs/promises';
++import os from 'node:os';
++import path from 'node:path';
++import { MAX_EDITOR_BYTES, parseEditorPath, listEditorDirectory, readEditorFile, parseFileEdit, writeEditorFile } from '../lib/project-files.js';
++import { parseCommitMessage } from '../lib/security.js';
++
++async function workspace(t) {
++  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'pusher-editor-test-'));
++  t.after(() => fs.rm(root, { recursive: true, force: true }));
++  return root;
++}
++
++test('editor paths reject traversal, git metadata, generated root folders and non-string paths', () => {
++  assert.equal(parseEditorPath('src/नमस्ते app.js'), 'src/नमस्ते app.js');
++  assert.equal(parseEditorPath(undefined, { directory: true }), '');
++  for (const value of ['../outside', '/etc/passwd', 'a/../../b', 'a//b', 'a/./b', 'C:/x', 'a\\b', '.git/config', 'src/.GiT/hooks/x', 'node_modules/a.js', 'a\0b', {}, ['a'], '']) {
++    assert.throws(() => parseEditorPath(value), { code: 'INVALID_FILE_PATH' }, String(value));
++  }
++});
++
++test('explorer lists folders first and hides metadata, excluded folders, links and special files', async t => {
++  const root = await workspace(t);
++  await fs.mkdir(path.join(root, 'src'));
++  await fs.mkdir(path.join(root, '.git'));
++  await fs.mkdir(path.join(root, 'node_modules'));
++  await fs.writeFile(path.join(root, 'readme.md'), 'hello');
++  await fs.symlink(os.tmpdir(), path.join(root, 'linked'));
++  const listing = await listEditorDirectory(root, '');
++  assert.deepEqual(listing.entries.map(x => [x.name, x.type]), [['src', 'directory'], ['readme.md', 'file']]);
++  await assert.rejects(listEditorDirectory(root, 'linked'), { code: 'INVALID_FILE_PATH' });
++  await assert.rejects(readEditorFile(root, 'linked/nope'), { code: 'INVALID_FILE_PATH' });
++  await assert.rejects(readEditorFile(root, 'missing.txt'), { code: 'FILE_NOT_FOUND' });
++});
++
++test('UTF-8, BOM, CRLF and empty files round trip; stale versions cannot overwrite newer edits', async t => {
++  const root = await workspace(t);
++  const initial = '\ufeffhello\r\nनमस्ते\r\n';
++  await fs.writeFile(path.join(root, 'file.txt'), initial);
++  const opened = await readEditorFile(root, 'file.txt');
++  assert.equal(opened.content, initial);
++  const noChange = await writeEditorFile(root, parseFileEdit(opened));
++  assert.equal(noChange.changed, false);
++  const saved = await writeEditorFile(root, parseFileEdit({ ...opened, content: '\ufeffupdated\r\n' }));
++  assert.equal(saved.changed, true);
++  assert.equal(await fs.readFile(path.join(root, 'file.txt'), 'utf8'), '\ufeffupdated\r\n');
++  await assert.rejects(writeEditorFile(root, parseFileEdit({ ...opened, content: 'stale tab' })), { code: 'FILE_CHANGED' });
++  assert.equal((await readEditorFile(root, 'file.txt')).sha, saved.sha);
++  await writeEditorFile(root, parseFileEdit({ ...saved, content: '' }));
++  assert.equal((await readEditorFile(root, 'file.txt')).size, 0);
++});
++
++test('binary, invalid UTF-8, large files and invalid save versions are refused', async t => {
++  const root = await workspace(t);
++  await fs.writeFile(path.join(root, 'binary'), Buffer.from([0, 65, 66]));
++  await fs.writeFile(path.join(root, 'bad-utf8'), Buffer.from([0xff, 0xfe]));
++  await fs.writeFile(path.join(root, 'large'), Buffer.alloc(MAX_EDITOR_BYTES + 1, 65));
++  for (const name of ['binary', 'bad-utf8']) await assert.rejects(readEditorFile(root, name), { code: 'BINARY_FILE' });
++  await assert.rejects(readEditorFile(root, 'large'), { code: 'FILE_TOO_LARGE' });
++  assert.throws(() => parseFileEdit({ path: 'x', content: 'hello', sha: 'bad' }), { code: 'INVALID_FILE_VERSION' });
++  assert.throws(() => parseFileEdit({ path: 'x', content: 'a\0b', sha: 'a'.repeat(64) }), { code: 'INVALID_FILE_CONTENT' });
++  assert.throws(() => parseFileEdit({ path: 'x', content: 'é'.repeat(MAX_EDITOR_BYTES), sha: 'a'.repeat(64) }), { code: 'FILE_TOO_LARGE' });
++});
++
++test('custom messages preserve user text; blank uses the default and invalid input is rejected', () => {
++  const message = 'Fix folder import\n\nKeep nested files. नमस्ते';
++  assert.equal(parseCommitMessage(message), message);
++  assert.equal(parseCommitMessage('  exact spacing  '), '  exact spacing  ');
++  for (const value of [undefined, null, '', ' \t\r\n']) assert.equal(parseCommitMessage(value), null);
++  for (const value of [42, {}, ['x'], 'x\0y', 'x'.repeat(5001)]) assert.throws(() => parseCommitMessage(value), { code: 'INVALID_COMMIT_MESSAGE' });
++});
+diff --git a/scripts/test-push-safety.mjs b/scripts/test-push-safety.mjs
+index 0c7ff4a..9fce82b 100644
+--- a/scripts/test-push-safety.mjs
++++ b/scripts/test-push-safety.mjs
+@@ -545,3 +545,16 @@ test('a push authenticates to an HTTP remote with the token and lands every file
+     assert.deepEqual(await remoteFiles(remote.bare), ['README.md', 'a/README.md', 'a/b/c.txt']);
+   } finally { remote.close(); }
+ });
++
++test('custom commit messages reach Git unchanged and an unchanged workspace creates no commit', async () => {
++  const remote = await bareRepo();
++  const { deps } = pushDeps({ remote, files: { 'src/app.js': 'hello' } });
++  const message = '  Improve editor navigation\n\nKeep nested files. नमस्ते  ';
++  const first = await push({ id: 'custom-message' }, { deps }, { message });
++  const commit = (await gitIn(remote)(['cat-file', '-p', first.commit])).stdout;
++  assert.equal(commit.slice(commit.indexOf('\n\n') + 2), message + '\n');
++  const second = await push({ id: 'custom-message', lastPushedCommit: first.commit, lastPushedAt: new Date().toISOString() }, { deps }, { message: 'No new commit for identical files' });
++  assert.equal(second.outcome, 'no-changes');
++  assert.equal(second.commit, first.commit);
++  assert.equal((await gitIn(remote)(['rev-list', '--count', 'main'])).stdout.trim(), '1');
++});
+diff --git a/scripts/test-security.mjs b/scripts/test-security.mjs
+index a88742a..2330d71 100644
+--- a/scripts/test-security.mjs
++++ b/scripts/test-security.mjs
+@@ -143,6 +143,8 @@ const counters = { oauthInserts: 0, storageReads: 0 };
+ // Seeded projects (u1-u6) have failing Storage; anything else lives in this in-memory store, so a
+ // real upload followed by a delete can be checked end to end.
+ const store = new Map(); // object path -> Buffer
++let failEditorManifest = false;
++let failEditorRow = null;
+ const projectRows = new Map(); // id -> row written by the server
+ // u7 uploads and deletes a real project; u8 probes unknown project ids. Neither has seeded data.
+ users.u7 = { token: 'token-u7', id: '1007', projectId: null };
+@@ -156,10 +158,10 @@ for (const u of [users.u7, users.u8, users.u9, users.u10]) byHash.set(tokenHash(
+ async function storageRoute(req, res, rest, body, send) {
+   const BUCKET = 'gpp-private/';
+   if (req.method === 'POST' && rest.startsWith('list/')) {
+-    const { prefix = '' } = JSON.parse(body.toString() || '{}');
++    const { prefix = '', offset = 0, limit = 1000 } = JSON.parse(body.toString() || '{}');
+     const dir = prefix.replace(/\/$/, '') + '/';
+-    const names = [...store.keys()].filter(k => k.startsWith(dir) && !k.slice(dir.length).includes('/')).map(k => k.slice(dir.length));
+-    return send(200, names.map(name => ({ name, id: `id-${name}`, metadata: { size: store.get(dir + name).length } })));
++    const names = [...new Set([...store.keys()].filter(k => k.startsWith(dir)).map(k => k.slice(dir.length).split('/')[0]))].sort().slice(offset, offset + limit);
++    return send(200, names.map(name => store.has(dir + name) ? { name, id: `id-${name}`, metadata: { size: store.get(dir + name).length } } : { name, id: null, metadata: null }));
+   }
+   if (req.method === 'DELETE') {
+     const { prefixes = [] } = JSON.parse(body.toString() || '{}');
+@@ -171,6 +173,10 @@ async function storageRoute(req, res, rest, body, send) {
+     return store.has(key) ? send(200, { name: key, size: store.get(key).length }) : send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+   }
+   const key = decodeURIComponent(rest.slice(BUCKET.length));
++  if (failEditorManifest && ['POST', 'PUT'].includes(req.method) && key.includes('/edits/') && key.endsWith('/manifest.json')) {
++    failEditorManifest = false;
++    return send(500, { statusCode: '500', error: 'internal', message: 'Simulated editor manifest upload failure' });
++  }
+   if (req.method === 'POST' || req.method === 'PUT') { store.set(key, body); return send(200, { Key: BUCKET + key }); }
+   if (store.has(key)) { res.writeHead(200, { 'Content-Type': 'application/octet-stream' }); return res.end(store.get(key)); }
+   return send(400, { statusCode: '404', error: 'not_found', message: 'Object not found' });
+@@ -194,7 +200,13 @@ function mockSupabase() {
+     }
+     const table = url.pathname.replace('/rest/v1/', '');
+     if (table === 'projects' && req.method === 'POST') {
+-      for (const row of [].concat(JSON.parse(body.toString()))) projectRows.set(row.id, row);
++      const rows = [].concat(JSON.parse(body.toString()));
++      if (failEditorRow && rows.some(row => row.storage_path?.includes('/edits/'))) {
++        if (failEditorRow === 'after-write') for (const row of rows) projectRows.set(row.id, row);
++        failEditorRow = null;
++        return send(500, { message: 'Simulated editor row acknowledgement failure' });
++      }
++      for (const row of rows) projectRows.set(row.id, row);
+       return send(201, []);
+     }
+     if (table === 'projects' && req.method === 'DELETE') { projectRows.delete(eq('id')); return send(204); }
+@@ -474,3 +486,107 @@ test('e2e: a path uploaded both as a file and as a folder is refused', async ()
+   assert.equal(body.code, 'PATH_CONFLICT');
+   assert.equal(store.size, before);
+ });
++
++test('e2e: editor opens nested files, saves persistently, rejects stale tabs and enforces ownership', async () => {
++  const up = await upload(users.u9, uploadForm('editor', { 'src/app.js': 'console.log("before");\r\n', 'README.md': 'readme', 'logo.bin': new Uint8Array([0, 1, 2]) }));
++  const project = await up.json();
++  assert.equal(up.status, 200, JSON.stringify(project));
++  const endpoint = `/api/projects/${project.id}`;
++  const root = await asUser(users.u9, 'GET', `${endpoint}/files`);
++  assert.equal(root.headers.get('cache-control'), 'no-store');
++  assert.deepEqual((await root.json()).entries.map(x => x.name), ['src', 'logo.bin', 'README.md']);
++  const dir = await asUser(users.u9, 'GET', `${endpoint}/files?path=src`);
++  assert.deepEqual((await dir.json()).entries.map(x => x.path), ['src/app.js']);
++  const opened = await (await asUser(users.u9, 'GET', `${endpoint}/file?path=src%2Fapp.js`)).json();
++  assert.equal(opened.content, 'console.log("before");\r\n');
++  const edit = { ...opened, content: 'console.log("after");\r\n' };
++  const deniedRead = await asUser(users.u8, 'GET', `${endpoint}/file?path=src%2Fapp.js`);
++  const deniedSave = await asUser(users.u8, 'POST', `${endpoint}/file`, edit);
++  assert.equal(deniedRead.status, 404);
++  assert.equal(deniedSave.status, 404);
++  const savedResponse = await asUser(users.u9, 'POST', `${endpoint}/file`, edit);
++  const saved = await savedResponse.json();
++  assert.equal(savedResponse.status, 200, JSON.stringify(saved));
++  assert.equal(saved.changed, true);
++  assert.notEqual(saved.sha, opened.sha);
++  const reloaded = await (await asUser(users.u9, 'GET', `${endpoint}/file?path=src%2Fapp.js`)).json();
++  assert.equal(reloaded.content, edit.content);
++  assert.equal(reloaded.sha, saved.sha);
++  const row = projectRows.get(project.id);
++  assert.match(row.storage_path, /\/edits\//);
++  assert.equal(row.sync_state, 'local');
++  assert.equal(JSON.parse(store.get(row.storage_path.replace('working.tgz', 'manifest.json'))).fileCount, 3);
++  const version = row.storage_path;
++  const unchanged = await asUser(users.u9, 'POST', `${endpoint}/file`, reloaded);
++  assert.equal((await unchanged.json()).changed, false);
++  assert.equal(projectRows.get(project.id).storage_path, version, 'no-op save uploads no new version');
++  const stale = await asUser(users.u9, 'POST', `${endpoint}/file`, edit);
++  assert.equal(stale.status, 409);
++  assert.equal((await stale.json()).code, 'FILE_CHANGED');
++  assert.equal(projectRows.get(project.id).storage_path, version);
++
++  for (const relative of ['../server.js', '.git/config', 'src/../../x']) {
++    const r = await asUser(users.u9, 'GET', `${endpoint}/file?path=${encodeURIComponent(relative)}`);
++    assert.equal(r.status, 400, relative);
++    assert.equal((await r.json()).code, 'INVALID_FILE_PATH');
++  }
++  const unauthenticated = await fetch(`${base}${endpoint}/files`);
++  assert.equal(unauthenticated.status, 401);
++});
++
++test('e2e: a failed editor upload leaves the previous archive and file content intact', async () => {
++  const up = await upload(users.u9, uploadForm('save-failure', { 'file.txt': 'original' }));
++  const project = await up.json();
++  const endpoint = `/api/projects/${project.id}/file`;
++  const opened = await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json();
++  const before = projectRows.get(project.id).storage_path;
++  const archive = Buffer.from(store.get(before));
++  failEditorManifest = true;
++  const failed = await asUser(users.u9, 'POST', endpoint, { ...opened, content: 'unsaved new text' });
++  assert.equal(failed.status, 500);
++  assert.equal(projectRows.get(project.id).storage_path, before);
++  assert.deepEqual(store.get(before), archive);
++  assert.equal((await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json()).content, 'original');
++  assert.equal([...store.keys()].filter(key => key.includes(`${project.id}/edits/`)).length, 0, 'failed version is cleaned up');
++});
++
++test('e2e: invalid commit messages are refused before storage or GitHub access', async () => {
++  const before = counters.storageReads;
++  for (const commitMessage of [42, ['bad'], 'x\0y', 'x'.repeat(5001)]) {
++    const response = await push(users.u8, { projectId: crypto.randomUUID(), commitMessage });
++    assert.equal(response.status, 400);
++    assert.equal((await response.json()).code, 'INVALID_COMMIT_MESSAGE');
++  }
++  assert.equal(counters.storageReads, before);
++});
++
++test('e2e: editor database failures never delete a referenced project archive', async () => {
++  for (const failure of ['before-write', 'after-write']) {
++    const up = await upload(users.u9, uploadForm('row-failure', { 'file.txt': 'original' }));
++    const project = await up.json();
++    const endpoint = `/api/projects/${project.id}/file`;
++    const opened = await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json();
++    failEditorRow = failure;
++    const failed = await asUser(users.u9, 'POST', endpoint, { ...opened, content: 'new content' });
++    assert.equal(failed.status, 500);
++    const row = projectRows.get(project.id);
++    assert.equal(store.has(row.storage_path), true, failure);
++    const reloaded = await (await asUser(users.u9, 'GET', `${endpoint}?path=file.txt`)).json();
++    assert.equal(reloaded.content, failure === 'before-write' ? 'original' : 'new content');
++    if (failure === 'before-write') assert.equal([...store.keys()].filter(key => key.includes(`${project.id}/edits/`)).length, 0);
++  }
++});
++
++test('e2e: removing an edited project deletes active and orphaned versions from nested folders', async () => {
++  const up = await upload(users.u9, uploadForm('remove-editor', { 'file.txt': 'original' }));
++  const project = await up.json();
++  const endpoint = `/api/projects/${project.id}`;
++  const opened = await (await asUser(users.u9, 'GET', `${endpoint}/file?path=file.txt`)).json();
++  const saved = await asUser(users.u9, 'POST', `${endpoint}/file`, { ...opened, content: 'saved edit' });
++  assert.equal(saved.status, 200, JSON.stringify(await saved.json()));
++  const orphan = `projects/${users.u9.id}/${project.id}/edits/orphan/working.tgz`;
++  store.set(orphan, Buffer.from('orphaned version'));
++  const deleted = await asUser(users.u9, 'DELETE', endpoint);
++  assert.deepEqual(await deleted.json(), { ok: true });
++  assert.equal([...store.keys()].filter(key => key.includes(project.id)).length, 0);
++});
+diff --git a/server.js b/server.js
+index bdc0075..1180cad 100644
+--- a/server.js
++++ b/server.js
+@@ -8,8 +8,9 @@ import { createClient } from '@supabase/supabase-js';
+ import * as tar from 'tar';
+ import helmet from 'helmet';
+ import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, performPush, planPull, lastKnownCommit } from './lib/push-core.js';
+-import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
++import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseCommitMessage, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
+ import { createGitRunner, withGitAuth, gitAuthEnv, checkGitCredentials } from './lib/git.js';
++import { parseEditorPath, listEditorDirectory, readEditorFile, parseFileEdit, writeEditorFile } from './lib/project-files.js';
+ 
+ const app = express();
+ const env = (name, fallback, range) => envInt(process.env, name, fallback, range);
+@@ -46,7 +47,7 @@ const GIT_TIMEOUT_MS = env('GIT_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
+ const JOB_TIMEOUT_MS = env('JOB_TIMEOUT_MS', 10 * 60 * 1000, { min: 1000 });
+ const GITHUB_TIMEOUT_MS = 30 * 1000;
+ const SUPABASE_TIMEOUT_MS = env('SUPABASE_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
+-const APP_NAME = process.env.APP_NAME || 'GitHub Project Pusher';
++const APP_NAME = process.env.APP_NAME || 'GitHub Pusher Studio';
+ const SESSION_COOKIE = 'gpp_session';
+ const OAUTH_BINDING_COOKIE = 'gpp_oauth_pre';
+ // Shared custom URI scheme for Android and Electron desktop OAuth handoff.
+@@ -457,9 +458,23 @@ async function storageDownload(objectPath) {
+ }
+ async function storageList(prefix) {
+   supabaseRequired();
+-  const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list(prefix, { limit: 1000 });
+-  if (error) throw new Error(`Storage list failed for ${prefix}: ${error.message}`);
+-  return (data || []).filter(entry => entry.id).map(entry => `${prefix}/${entry.name}`);
++  const files = [];
++  const folders = [prefix];
++  while (folders.length) {
++    const folder = folders.pop();
++    for (let offset = 0; ; offset += 1000) {
++      const { data, error } = await supabase.storage.from(STORAGE_BUCKET).list(folder, { limit: 1000, offset, sortBy: { column: 'name', order: 'asc' } });
++      if (error) throw new Error(`Storage list failed for ${folder}: ${error.message}`);
++      for (const entry of data || []) {
++        if (!entry.name || entry.name === '.' || entry.name === '..' || entry.name.includes('/')) continue;
++        const full = `${folder}/${entry.name}`;
++        if (entry.id) files.push(full);
++        else if (entry.id === null) folders.push(full);
++      }
++      if (!data || data.length < 1000) break;
++    }
++  }
++  return files;
+ }
+ // Removes everything stored for a project: the known paths plus anything else under its
+ // projects/ and snapshots/ folders. Returns the paths that could not be removed (already logged).
+@@ -760,6 +775,7 @@ const authLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AUTH_P
+ const exchangeLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AUTH_PER_15_MIN', 20) });
+ const pushLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_PUSH_PER_15_MIN', 20), key: 'user' });
+ const fetchLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_FETCH_PER_15_MIN', 30), key: 'user' });
++const editorLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_EDITOR_PER_15_MIN', 300), key: 'user' });
+ const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_UPLOAD_PER_15_MIN', 10), key: 'user' });
+ const heavyJob = jobSlot(JOB_GATE);
+ app.use('/api', apiLimit);
+@@ -839,7 +855,7 @@ const projectLocks = new Map();
+ async function withProjectLock(projectId, fn) {
+   const previous = projectLocks.get(projectId) || Promise.resolve();
+   let current;
+-  current = previous.then(fn).finally(() => {
++  current = previous.catch(() => {}).then(fn).finally(() => {
+     if (projectLocks.get(projectId) === current) projectLocks.delete(projectId);
+   });
+   projectLocks.set(projectId, current);
+@@ -1137,6 +1153,81 @@ app.get('/api/projects/:id/history', async (req, res) => {
+   } catch (e) { sendError(res, e, 'Project history'); }
+ });
+ 
++// Re-read ownership and the storage pointer under the same lock as saves/pulls/pushes.
++// A second tab or background pull must never silently replace a newer edit.
++async function withOwnedWorkspace(user, projectId, fn) {
++  return withProjectLock(projectId, async () => {
++    const project = await dbGetProject(projectId);
++    if (!project || String(project.userId) !== String(user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
++    return withWorkspace(project, dir => fn(project, dir));
++  });
++}
++
++app.get('/api/projects/:id/files', requireUser, editorLimit, heavyJob, runJob(async (req, res) => {
++  res.setHeader('Cache-Control', 'no-store');
++  try {
++    const id = parseProjectId(req.params.id);
++    const relative = parseEditorPath(req.query.path, { directory: true });
++    const listing = await withOwnedWorkspace(req.auth.user, id, (_project, dir) => listEditorDirectory(dir, relative));
++    res.json(listing);
++  } catch (e) { sendError(res, e, 'Browse project files'); }
++}));
++
++app.get('/api/projects/:id/file', requireUser, editorLimit, heavyJob, runJob(async (req, res) => {
++  res.setHeader('Cache-Control', 'no-store');
++  try {
++    const id = parseProjectId(req.params.id);
++    const relative = parseEditorPath(req.query.path);
++    const file = await withOwnedWorkspace(req.auth.user, id, (_project, dir) => readEditorFile(dir, relative));
++    res.json(file);
++  } catch (e) { sendError(res, e, 'Read project file'); }
++}));
++
++app.post('/api/projects/:id/file', ensureRequestProtection, requireUser, editorLimit, heavyJob, runJob(async (req, res) => {
++  res.setHeader('Cache-Control', 'no-store');
++  try {
++    const id = parseProjectId(req.params.id);
++    const edit = parseFileEdit(req.body);
++    const result = await withOwnedWorkspace(req.auth.user, id, async (project, dir) => {
++      // Snapshot before changing the temporary workspace; a failed save keeps the stored copy.
++      const current = await readEditorFile(dir, edit.path);
++      if (current.sha !== edit.sha) throw new AppError('FILE_CHANGED', 'This file changed since you opened it. Copy your draft, then reopen the file to review the latest version.', { status: 409 });
++      if (current.content === edit.content) return { ...current, changed: false };
++      await snapshotProject(project, dir, 'before-editor-save');
++      const file = await writeEditorFile(dir, edit);
++      // Publish the new archive/manifest together by switching the row only after both verify.
++      // In particular, do not overwrite working.tgz if its companion upload might still fail.
++      const nextPath = `projects/${project.userId}/${id}/edits/${crypto.randomUUID()}/working.tgz`;
++      let stored;
++      let publishing = false;
++      try {
++        stored = await persistWorkingTree({ ...project, storagePath: nextPath }, dir);
++        publishing = true;
++        await dbUpsertProject({
++          ...project, storagePath: stored.storagePath, fileCount: stored.manifest.fileCount,
++          updatedAt: nowIso(), lastLocalChangeAt: nowIso(), syncState: 'local',
++          syncMessage: 'Editor changes saved to the project workspace. Push Selected to publish them to GitHub.'
++        });
++      } catch (e) {
++        // A lost database acknowledgement may still mean the pointer was switched. Only
++        // delete staged bytes when we know the row is not using them.
++        const recorded = publishing ? await dbGetProject(id).catch(() => null) : project;
++        if (recorded && recorded.storagePath !== nextPath) {
++          await supabase.storage.from(STORAGE_BUCKET).remove([nextPath, manifestPathFor(nextPath)]).catch(() => {});
++        }
++        throw e;
++      }
++      if (project.storagePath) {
++        const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([project.storagePath, manifestPathFor(project.storagePath)]).catch(error => ({ error }));
++        if (error) console.warn(`Editor ${id}: superseded workspace cleanup failed.`);
++      }
++      return file;
++    });
++    if (result.changed) broadcast(req.auth.user.id, { type: 'project-updated', projectId: id, reason: 'editor-save' });
++    res.json(result);
++  } catch (e) { sendError(res, e, 'Save project file', 'Your changes could not be saved. Keep your draft and try again.'); }
++}));
++
+ app.get('/api/github/repos', async (req, res) => {
+   const a = await authUser(req, res); if (!a) return;
+   try {
+@@ -1175,6 +1266,7 @@ async function parsePushRequest(body = {}) {
+     repoId: parseRepoId(body.repoId),
+     repoName: parseOptionalString(body.repoName, 'Repository name', { max: 100 }),
+     visibility: parseEnum(body.visibility, 'Visibility', ['private', 'public'], 'private'),
++    commitMessage: parseCommitMessage(body.commitMessage),
+     branch: parseBranch(body.branch),
+     conflictResolution: parseEnum(body.conflictResolution, 'Conflict resolution', ['keep-local'], null)
+   };
+@@ -1200,7 +1292,7 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
+   try {
+     input = await parsePushRequest(req.body);
+   } catch (e) { return sendError(res, e, 'Push request'); }
+-  const { projectId, repoId, repoName, visibility, branch, conflictResolution } = input;
++  const { projectId, repoId, repoName, visibility, branch, conflictResolution, commitMessage } = input;
+   let project;
+   try {
+     project = await dbGetProject(projectId);
+@@ -1210,14 +1302,19 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
+     const token = await userToken(a.user);
+     if (!token) throw new PushError('GITHUB_NOT_CONNECTED', 'Connect GitHub before pushing.', { status: 401 });
+     const github = (url, options = {}) => githubFetch(url, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } });
+-    const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
++    const cancellation = new AbortController();
++    res.on('close', () => { if (!res.writableEnded) cancellation.abort(); });
++    if (res.destroyed) cancellation.abort();
++    const deadline = AbortSignal.any([AbortSignal.timeout(JOB_TIMEOUT_MS), cancellation.signal]);
+     let result;
+     await withProjectLock(project.id, async () => {
++      project = await dbGetProject(projectId);
++      if (!project || String(project.userId) !== String(a.user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
+       result = await performPush({
+         project,
+         branch,
+         keepLocalOnConflict: conflictResolution === 'keep-local',
+-        message: `Sync from ${APP_NAME} ${nowIso()}`,
++        message: commitMessage ?? `Sync from ${APP_NAME} ${nowIso()}`,
+         deps: {
+           withWorkspace,
+           prepareGit: ensureGit,
+@@ -1320,13 +1417,14 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
+ 
+ async function syncProjectForUser(user, project) {
+   if (!project.repoFullName) return;
+-  const branch = project.branch || 'main';
+-  if (branch !== project.branch) {
+-    // Auto-set branch to main if missing and persist to DB
+-    await updateProject(project.id, user.id, { branch }).catch(e => console.warn(`Failed to set default branch: ${e.message}`));
+-    project.branch = branch;
+-  }
+   await withProjectLock(project.id, async () => {
++    project = await dbGetProject(project.id);
++    if (!project || String(project.userId) !== String(user.id)) return;
++    const branch = project.branch || 'main';
++    if (branch !== project.branch) {
++      await updateProject(project.id, user.id, { branch }).catch(e => console.warn(`Failed to set default branch: ${e.message}`));
++      project.branch = branch;
++    }
+     const token = await userToken(user);
+     if (!token) return;
+     try {

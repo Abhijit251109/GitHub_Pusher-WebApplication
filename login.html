@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="theme-color" content="#111827">
-<title>GitHub Project Pusher — Login</title>
+<title>GitHub Pusher Studio — Login</title>
 <style>
   :root {
     color-scheme: dark;
@@ -191,10 +191,10 @@
 </head>
 <body>
 <main>
-  <h1>GitHub Project Pusher</h1>
+  <h1>GitHub Pusher Studio</h1>
   <p id="status" class="muted">Opening GitHub login…</p>
   <div id="setup" class="hidden">
-    <p class="muted">This file is being opened directly. Enter the URL where your GitHub Project Pusher server is running.</p>
+    <p class="muted">This file is being opened directly. Enter the URL where your GitHub Pusher Studio server is running.</p>
     <input id="appUrl" class="url" placeholder="https://your-domain.example" autocomplete="url">
     <div class="row">
       <button id="go">Open GitHub login</button>
@@ -232,7 +232,7 @@
   // Standalone file: use a previously saved server URL, otherwise ask once.
   const saved = localStorage.getItem('gpp_app_url');
   if (saved) {
-    status.textContent = 'Opening your GitHub Project Pusher server…';
+    status.textContent = 'Opening your GitHub Pusher Studio server…';
     go(saved);
     return;
   }
