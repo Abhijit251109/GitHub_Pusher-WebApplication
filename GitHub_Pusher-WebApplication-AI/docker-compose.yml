@@ -1,0 +1,12 @@
+services:
+  github-project-pusher:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "4173:4173"
+    env_file:
+      - .env
+    volumes:
+      - gpp-data:/app/data
+volumes:
+  gpp-data:

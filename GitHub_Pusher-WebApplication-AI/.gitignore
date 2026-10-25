@@ -1,0 +1,23 @@
+node_modules/
+data/
+workspace/
+*.log
+.env
+.env.*
+!.env.example
+dist/
+release/
+.DS_Store
+.idea/
+.junie/
+# Backend secrets / local environment
+.env
+.env.*
+.env.example
+*.env.local
+*.env.production
+*.env.backup
+
+#script and prompts
+orchestrate.sh
+qa-prompts.md

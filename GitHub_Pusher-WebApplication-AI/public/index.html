@@ -1,0 +1,289 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
+  <meta name="description" content="Browse files, edit code, fetch changes and push projects with GitHub Pusher Studio." />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self' https://*.onrender.com https://*.github.io http://127.0.0.1:* http://localhost:*; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self' https://github.com; worker-src 'self'">
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="manifest" href="manifest.webmanifest" />
+  <link rel="icon" href="icons/icon.svg" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="theme.js"></script>
+  <title>GitHub Pusher Studio</title>
+</head>
+<body>
+  <header class="topbar">
+    <a class="brand-lockup" href="./" aria-label="GitHub Pusher Studio home">
+      <span class="brand-mark" aria-hidden="true">⌁</span>
+      <span>
+        <span class="brand">GitHub Pusher Studio</span>
+        <span class="sub">Browse · Edit · Sync · Push</span>
+      </span>
+    </a>
+    <div class="top-actions">
+      <label class="theme-control">
+        <span class="sr-only">Color theme</span>
+        <select data-theme-select aria-label="Color theme">
+          <option value="system">System theme</option>
+          <option value="light">Light theme</option>
+          <option value="dark">Dark theme</option>
+        </select>
+      </label>
+      <button id="installBtn" class="ghost" hidden>Install App</button>
+      <div id="userBox"></div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- Auth / Sign-in View -->
+    <section id="authView" class="card auth" hidden>
+      <div class="orb" aria-hidden="true">⇄</div>
+      <span class="eyebrow">Your development workspace</span>
+      <h1>Your projects, always with you.</h1>
+      <p>Sign in with GitHub to keep your project library on the server, push projects, and automatically pull remote changes.</p>
+      <a class="primary big" id="loginLink" href="login.html">Continue with GitHub</a>
+      <small>GitHub permissions are requested through GitHub's authorization screen. Your token stays server-side.</small>
+    </section>
+
+    <!-- Public Downloads (visible before auth) -->
+    <section id="publicDownloads" class="card downloads">
+      <div class="section-head">
+        <div>
+          <h2>Downloads</h2>
+          <p>Available builds are detected automatically from the application folder.</p>
+        </div>
+      </div>
+      <div id="downloadList" class="download-grid">
+        <div class="muted">Checking for available builds…</div>
+      </div>
+    </section>
+
+    <!-- Main App View (after auth) -->
+    <section id="appView" hidden>
+      <div class="workspace-heading">
+        <div>
+          <span class="eyebrow">YOUR WORKSPACE</span>
+          <h1>Your code. Your workspace.</h1>
+          <p>Open your projects, edit files, and publish changes when you are ready.</p>
+        </div>
+        <span class="workspace-badge">
+          <span class="dot" aria-hidden="true"></span>Cloud workspace
+        </span>
+      </div>
+
+      <!-- Toolbar -->
+      <div class="toolbar card">
+        <div class="toolbar-left">
+          <button id="addBtn" class="primary">＋ Add Project</button>
+          <button id="openBtn" class="secondary" disabled>⌘ Open Selected</button>
+          <button id="pushBtn" class="secondary" disabled>↥ Push Selected</button>
+          <button id="fetchBtn" class="secondary" disabled>⇩ Fetch Changes</button>
+          <button id="removeBtn" class="danger" disabled>Remove</button>
+        </div>
+        <div class="toolbar-right">
+          <span id="liveDot" class="dot"></span>
+          <span id="liveText" aria-live="polite">Connecting…</span>
+          <button id="refreshBtn" class="ghost">Refresh</button>
+        </div>
+      </div>
+
+      <!-- Projects Grid -->
+      <div class="grid">
+        <section class="card projects">
+          <div class="section-head">
+            <div>
+              <h2>My Projects</h2>
+              <p id="projectSummary">Loading projects…</p>
+            </div>
+            <input id="search" type="search" placeholder="Search projects…" aria-label="Search projects" />
+          </div>
+          <div id="projectList" class="project-list" aria-live="polite"></div>
+          <div id="empty" class="empty loading-message" aria-live="polite">Loading your project library…</div>
+        </section>
+        <aside class="card details">
+          <h2>Project Details</h2>
+          <div id="detailsEmpty" class="muted">Select a project to see GitHub, sync, and snapshot information.</div>
+          <div id="details" hidden></div>
+        </aside>
+      </div>
+
+      <section id="workspaceEditor" class="card studio" aria-labelledby="editorHeading" hidden>
+        <div class="section-head studio-heading">
+          <div>
+            <span class="eyebrow">PUSHER STUDIO</span>
+            <h2 id="editorHeading">Project editor</h2>
+            <p id="editorProjectName"></p>
+          </div>
+          <div class="studio-actions">
+            <button id="editorReload" class="ghost" type="button">Reload files</button>
+            <button id="editorClose" class="ghost" type="button">Close editor</button>
+          </div>
+        </div>
+        <p class="studio-note">Save to your app workspace, fetch the latest GitHub changes, then Push Selected when ready. The folder originally uploaded from your device is unchanged.</p>
+        <div class="studio-grid">
+          <nav class="file-explorer" aria-label="Project files">
+            <div class="explorer-location">
+              <button id="folderUp" class="ghost" type="button" aria-label="Parent folder" disabled>↑</button>
+              <button id="folderRoot" class="ghost" type="button">Root</button>
+              <span id="folderPath" class="file-path">/</span>
+            </div>
+            <div id="fileList" class="file-list" aria-live="polite"></div>
+          </nav>
+          <div class="code-pane">
+            <div class="code-toolbar">
+              <span id="editorFileName" class="file-path">Select a file</span>
+              <span id="editorDirty" class="state" hidden>Unsaved</span>
+              <button id="editorSave" class="primary" type="button" disabled>Save file</button>
+            </div>
+            <p id="editorStatus" class="editor-status" role="status">Open a text file to start editing. Binary files and files over 2 MiB are kept unchanged.</p>
+            <label class="sr-only" for="codeEditor">File contents</label>
+            <textarea id="codeEditor" class="code-editor" spellcheck="false" autocomplete="off" autocapitalize="off" aria-describedby="editorStatus" hidden></textarea>
+            <div class="editor-footer"><span id="editorPosition">UTF-8</span><span>Ctrl / ⌘ + S to save</span></div>
+          </div>
+        </div>
+        <section id="aiAgent" class="ai-agent" aria-labelledby="aiHeading">
+          <div class="section-head ai-heading">
+            <div>
+              <span class="eyebrow">PUSHER AI</span>
+              <h3 id="aiHeading">Plan an edit. Review every change.</h3>
+              <p id="aiProviderStatus" role="status">Open a project to check AI availability.</p>
+            </div>
+            <button id="aiCheckStatus" class="ghost" type="button">Check configuration</button>
+          </div>
+          <p class="ai-note" id="aiPrivacy">Only the saved files you attach and your instruction are sent to the configured model. Check them for secrets before sending. Apply saves to your app workspace. Push Selected publishes to GitHub.</p>
+          <div class="ai-context-toolbar">
+            <strong>Selected files <span id="aiFileCount">0 / 6</span></strong>
+            <button id="aiAttachFile" class="secondary" type="button" disabled>Add open file</button>
+            <button id="aiClearFiles" class="ghost" type="button" disabled>Clear files</button>
+          </div>
+          <ul id="aiFiles" class="ai-files" aria-label="Files shared with the model"></ul>
+          <p id="aiContextHint" class="muted">Open and save a file, then add it here. Attach up to six files for one edit.</p>
+          <label for="aiInstruction">What should change?</label>
+          <textarea id="aiInstruction" rows="3" maxlength="4000" placeholder="For example: validate empty input and explain the error to the user. Keep the existing API." aria-describedby="aiPrivacy aiContextHint"></textarea>
+          <div class="ai-actions">
+            <button id="aiGenerate" class="primary" type="button" disabled>Generate edits</button>
+            <button id="aiCancel" class="ghost" type="button" hidden>Cancel request</button>
+            <button id="aiDiscardAll" class="ghost" type="button" hidden>Discard proposals</button>
+          </div>
+          <p id="aiStatus" class="ai-note" role="status" aria-live="polite">The agent proposes changes to existing files. Review and apply each file when ready.</p>
+          <section id="aiReview" class="ai-review" aria-labelledby="aiReviewHeading" hidden>
+            <h3 id="aiReviewHeading" tabindex="-1">Review proposed changes</h3>
+            <p id="aiSummary" class="ai-summary"></p>
+            <div id="aiChanges"></div>
+          </section>
+        </section>
+      </section>
+
+      <!-- Snapshots -->
+      <section class="card snapshots">
+        <div class="section-head">
+          <div>
+            <h2>Safety Snapshots</h2>
+            <p>Before and after every push/pull.</p>
+          </div>
+        </div>
+        <div id="snapshotList" class="snapshot-list"></div>
+      </section>
+
+      <!-- Downloads -->
+      <section class="card downloads">
+        <div class="section-head">
+          <div>
+            <h2>Downloads</h2>
+            <p>Native builds found in the application folder.</p>
+          </div>
+        </div>
+        <div id="downloadListApp" class="download-grid">
+          <div class="muted">Checking for available builds…</div>
+        </div>
+      </section>
+
+      <!-- PWA Install -->
+      <section class="card install">
+        <div>
+          <h2>Install the app</h2>
+          <p>On Android or a modern desktop browser, use the button below to install the PWA. The same hosted account works across your devices.</p>
+        </div>
+        <button id="installBtn2" class="secondary">Install</button>
+      </section>
+    </section>
+  </main>
+
+  <!-- Add Project Dialog -->
+  <dialog id="addDialog">
+    <form method="dialog" id="addForm">
+      <h2>Add Project</h2>
+      <label>
+        Project name
+        <input id="projectName" name="projectName" placeholder="my-project" />
+      </label>
+      <div class="file-picks">
+        <label class="pick">
+          <span>📁 Add folder</span>
+          <input id="folderInput" type="file" webkitdirectory directory multiple />
+        </label>
+        <label class="pick">
+          <span>📄 Add files</span>
+          <input id="fileInput" type="file" multiple />
+        </label>
+      </div>
+      <div id="addCount" class="muted">0 files selected</div>
+      <div class="dialog-actions">
+        <button id="cancelAdd" class="ghost" type="button">Cancel</button>
+        <button id="saveProject" class="primary" type="submit">Add Project</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Push Dialog -->
+  <dialog id="pushDialog">
+    <form method="dialog" id="pushForm">
+      <h2>Push Project</h2>
+      <div class="muted" id="pushProjectName"></div>
+      <label>
+        GitHub repository
+        <select id="repoSelect">
+          <option value="">＋ Create a new repository</option>
+        </select>
+      </label>
+      <label id="newRepoRow">
+        New repository name
+        <input id="newRepoName" />
+      </label>
+      <label id="visibilityRow">
+        Visibility
+        <select id="visibility">
+          <option value="private">Private</option>
+          <option value="public">Public</option>
+        </select>
+      </label>
+      <label>
+        Branch
+        <input id="branch" value="main" />
+      </label>
+      <label>
+        Commit message <span class="muted">(optional)</span>
+        <textarea id="commitMessage" rows="3" maxlength="5000" placeholder="Describe your changes…" aria-describedby="commitMessageHint"></textarea>
+      </label>
+      <small id="commitMessageHint" class="muted">Leave blank to use the automatic timestamped message. Unchanged files create no new commit.</small>
+      <div class="warning">Files from GitHub are preserved. If the same file changed in both places, you will be asked before replacing the GitHub version.</div>
+      <div class="dialog-actions">
+        <button id="cancelPush" class="ghost" type="button">Cancel</button>
+        <button id="confirmPush" class="primary" type="submit">Push</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Toast Notifications -->
+  <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <script src="config.js"></script>
+  <script src="app.js"></script>
+  <script src="editor.js"></script>
+  <script src="ai-agent.js"></script>
+</body>
+</html>

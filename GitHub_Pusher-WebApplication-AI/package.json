@@ -1,0 +1,36 @@
+{
+  "name": "github-pusher-studio",
+  "version": "3.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env server.js",
+    "dev": "node --env-file-if-exists=.env server.js",
+    "desktop": "electron electron/main.cjs",
+    "build:desktop": "electron-builder --config electron-builder.yml",
+    "build:windows-installer": "electron-builder --config electron-builder.yml --win msi",
+    "build:android": "node scripts/build-android.mjs",
+    "prepare:android": "node scripts/prepare-android.mjs",
+    "test": "node --test scripts/test-push-safety.mjs scripts/test-security.mjs scripts/test-project-files.mjs scripts/test-ai-agent.mjs",
+    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check lib/git.js && node --check lib/project-files.js && node --check public/app.js && node --check public/editor.js && node --check public/ai-agent.js && node --check lib/ai-agent.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "2.57.4",
+    "dotenv": "^18.0.7",
+    "express": "5.1.0",
+    "express-rate-limit": "8.7.0",
+    "helmet": "8.1.0",
+    "multer": "^2.4.0",
+    "tar": "7.5.22"
+  },
+  "devDependencies": {
+    "@capacitor/android": "^8.5.3",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "electron": "^44.7.0",
+    "electron-builder": "^26.5.0",
+    "typescript": "~5.0.2"
+  },
+  "main": "electron/main.cjs",
+  "license": "ISC"
+}
