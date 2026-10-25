@@ -11,6 +11,7 @@ import { ARCHIVE_SKIP_NAMES, PushError, buildManifest, verifyRestoredWorkspace, 
 import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBranch, parseRepoId, assertRepoName, parseOptionalString, parseCommitMessage, parseEnum, parseProjectId, tokenCanDeleteRepos, createJobGate, jobSlot, runJob, limiter, envInt } from './lib/security.js';
 import { createGitRunner, withGitAuth, gitAuthEnv, checkGitCredentials } from './lib/git.js';
 import { parseEditorPath, listEditorDirectory, readEditorFile, parseFileEdit, writeEditorFile } from './lib/project-files.js';
+import { remoteRefUrl, remoteMatchesKnownCommit } from './lib/sync-preflight.js';
 
 const app = express();
 const env = (name, fallback, range) => envInt(process.env, name, fallback, range);
@@ -40,6 +41,10 @@ const LOGIN_CODE_TTL_MS = 2 * 60 * 1000;
 const OAUTH_ATTEMPT_TTL_MS = 10 * 60 * 1000;
 const SSE_TICKET_TTL_MS = 5 * 60 * 1000;
 const SYNC_MS = env('SYNC_INTERVAL_MS', 30000, { min: 1000 });
+// Keep only a handful of verified, read-only editor workspaces on this Render instance.
+const EDITOR_CACHE_TTL_MS = env('EDITOR_CACHE_TTL_MS', 60000, { min: 1000 });
+const EDITOR_CACHE_MAX_PROJECTS = env('EDITOR_CACHE_MAX_PROJECTS', 3, { min: 1 });
+const EDITOR_CACHE_MAX_MB = env('EDITOR_CACHE_MAX_MB', 80, { min: 1 });
 // Each git call is killed after GIT_TIMEOUT_MS; a whole push/fetch/upload/sync job stops issuing
 // git calls after JOB_TIMEOUT_MS. GitHub API calls time out after 30 s. Supabase calls (including
 // archive uploads of up to MAX_ARCHIVE_MB) time out after SUPABASE_TIMEOUT_MS.
@@ -330,6 +335,16 @@ async function dbListUsers() {
   const data = await queryOne('users', db => db.from('users').select('*'));
   return (data || []).map(userFromRow);
 }
+async function dbListConnectedProjects() {
+  const result = [];
+  // Paginate: Supabase/PostgREST commonly caps one query at 1,000 rows.
+  for (let offset = 0; ; offset += 1000) {
+    const page = await queryOne('projects', db => db.from('projects').select('*').not('repo_full_name', 'is', null).order('id').range(offset, offset + 999));
+    result.push(...(page || []).filter(row => row.repo_full_name).map(projectFromRow));
+    if (!page || page.length < 1000) break;
+  }
+  return result;
+}
 
 async function createSession(userId) {
   const token = randomToken(32);
@@ -338,13 +353,15 @@ async function createSession(userId) {
 }
 async function sessionFromToken(token) {
   if (!token) return null;
-  const data = await queryOne('sessions', db => db.from('sessions').select('*').eq('id', hashSecret(token)).maybeSingle());
+  // Embed the session's user in the same PostgREST request (instead of two round trips).
+  const data = await queryOne('sessions', db => db.from('sessions').select('*, users(*)').eq('id', hashSecret(token)).maybeSingle());
   if (!data) return null;
   if (new Date(data.expires_at).getTime() < Date.now()) {
     await queryOne('sessions', db => db.from('sessions').delete().eq('id', data.id));
     return null;
   }
-  const user = await dbGetUser(data.user_id);
+  // Legacy mock backends without the embedded relation still work with the old lookup.
+  const user = Object.hasOwn(data, 'users') ? userFromRow(data.users) : await dbGetUser(data.user_id);
   if (!user) return null;
   return { sid: data.id, token, user };
 }
@@ -587,32 +604,87 @@ async function extractArchive(buffer, destination) {
     await fs.rm(archive, { force: true });
   }
 }
-// Restores the stored project and checks it against its manifest. Any failure aborts the caller:
-// an empty or partial workspace must never reach git.
+// Each restored workspace is verified against its stored manifest before it can be read.
+// Mutating operations use their own temporary workspace; only editor GETs can reuse this cache.
+async function restoreWorkspace(project, work) {
+  if (project?.storagePath) {
+    try {
+      const manifest = await loadManifest(project.storagePath);
+      const archive = await storageDownload(project.storagePath);
+      await extractArchive(archive, work);
+      const { fileCount, legacy } = await verifyRestoredWorkspace(work, manifest);
+      console.log(`withWorkspace: restored ${fileCount} files${legacy ? ' (no manifest, legacy project)' : ' (matches manifest)'} for project ${project.id}`);
+      return { cacheable: Boolean(manifest && Number.isFinite(manifest.totalBytes) && manifest.totalBytes <= EDITOR_CACHE_MAX_MB * 1024 * 1024) };
+    } catch (e) {
+      if (e instanceof PushError) throw e;
+      throw new PushError('RESTORE_FAILED', 'The stored copy of this project could not be restored from cloud storage. Nothing was sent to GitHub.', { status: 502, internal: e.message });
+    }
+  } else if (Number(project?.fileCount || 0) > 0) {
+    throw new PushError('RESTORE_FAILED', 'This project has no stored copy in cloud storage (it was never saved successfully). Remove the project and add it again. Nothing was sent to GitHub.', { status: 422 });
+  }
+  return { cacheable: false };
+}
 async function withWorkspace(project, fn) {
   const work = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-project-'));
   try {
-    if (project?.storagePath) {
-      try {
-        const manifest = await loadManifest(project.storagePath);
-        const archive = await storageDownload(project.storagePath);
-        await extractArchive(archive, work);
-        const { fileCount, legacy } = await verifyRestoredWorkspace(work, manifest);
-        console.log(`withWorkspace: restored ${fileCount} files${legacy ? ' (no manifest, legacy project)' : ' (matches manifest)'} for project ${project.id}`);
-      } catch (e) {
-        if (e instanceof PushError) throw e;
-        throw new PushError('RESTORE_FAILED', 'The stored copy of this project could not be restored from cloud storage. Nothing was sent to GitHub.', { status: 502, internal: e.message });
-      }
-    } else if (Number(project?.fileCount || 0) > 0) {
-      throw new PushError('RESTORE_FAILED', 'This project has no stored copy in cloud storage (it was never saved successfully). Remove the project and add it again. Nothing was sent to GitHub.', { status: 422 });
-    }
+    await restoreWorkspace(project, work);
     return await fn(work);
   } finally {
     await fs.rm(work, { recursive: true, force: true }).catch(() => {});
   }
 }
+
+const editorWorkspaces = new Map();
+async function evictEditorWorkspace(projectId) {
+  const entry = editorWorkspaces.get(projectId);
+  if (!entry) return;
+  editorWorkspaces.delete(projectId);
+  if (entry.inUse) { entry.pendingDelete = true; return; }
+  await fs.rm(entry.dir, { recursive: true, force: true }).catch(() => {});
+}
+async function withEditorWorkspace(project, fn) {
+  const now = Date.now();
+  // Do not remove a workspace while a read from another project is using it.
+  for (const [id, entry] of editorWorkspaces) {
+    if (!entry.inUse && now - entry.lastUsed >= EDITOR_CACHE_TTL_MS) await evictEditorWorkspace(id);
+  }
+  let entry = editorWorkspaces.get(project.id);
+  if (entry && entry.storagePath !== project.storagePath) {
+    await evictEditorWorkspace(project.id);
+    entry = null;
+  }
+  if (!entry) {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-editor-'));
+    let cacheable = false;
+    try { ({ cacheable } = await restoreWorkspace(project, dir)); }
+    catch (error) { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); throw error; }
+    if (!cacheable) {
+      try { return await fn(dir); }
+      finally { await fs.rm(dir, { recursive: true, force: true }).catch(() => {}); }
+    }
+    entry = { dir, storagePath: project.storagePath, inUse: 0, lastUsed: now, pendingDelete: false };
+    editorWorkspaces.set(project.id, entry);
+    // LRU eviction, never affecting another request currently browsing its cache.
+    while (editorWorkspaces.size > EDITOR_CACHE_MAX_PROJECTS) {
+      const victim = [...editorWorkspaces.entries()].find(([id, value]) => id !== project.id && !value.inUse);
+      if (!victim) break;
+      await evictEditorWorkspace(victim[0]);
+    }
+  }
+  entry.inUse++;
+  try { return await fn(entry.dir); }
+  finally {
+    entry.inUse--;
+    entry.lastUsed = Date.now();
+    if (!entry.inUse && entry.pendingDelete) {
+      await fs.rm(entry.dir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+}
 // Uploads the working tree plus a manifest of its files, and confirms both landed in Storage.
 async function persistWorkingTree(project, work) {
+  // The project archive may be overwritten at the same storage path; cached reads must expire.
+  await evictEditorWorkspace(project.id);
   const archive = path.join(os.tmpdir(), `gpp-working-${crypto.randomUUID()}.tgz`);
   try {
     // Exclude .git from the archive — it will be recreated by ensureGit on next workspace load
@@ -1133,6 +1205,7 @@ app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
     let leftover = [];
     await withProjectLock(project.id, async () => {
+      await evictEditorWorkspace(project.id);
       const snapshots = await queryOne('snapshots', db => db.from('snapshots').select('storage_path').eq('project_id', project.id));
       // Rows go first: a failed row delete must never leave a project pointing at removed storage.
       if (snapshots?.length) await queryOne('snapshots', db => db.from('snapshots').delete().eq('project_id', project.id));
@@ -1159,7 +1232,7 @@ async function withOwnedWorkspace(user, projectId, fn) {
   return withProjectLock(projectId, async () => {
     const project = await dbGetProject(projectId);
     if (!project || String(project.userId) !== String(user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
-    return withWorkspace(project, dir => fn(project, dir));
+    return withEditorWorkspace(project, dir => fn(project, dir));
   });
 }
 
@@ -1188,40 +1261,44 @@ app.post('/api/projects/:id/file', ensureRequestProtection, requireUser, editorL
   try {
     const id = parseProjectId(req.params.id);
     const edit = parseFileEdit(req.body);
-    const result = await withOwnedWorkspace(req.auth.user, id, async (project, dir) => {
-      // Snapshot before changing the temporary workspace; a failed save keeps the stored copy.
-      const current = await readEditorFile(dir, edit.path);
-      if (current.sha !== edit.sha) throw new AppError('FILE_CHANGED', 'This file changed since you opened it. Copy your draft, then reopen the file to review the latest version.', { status: 409 });
-      if (current.content === edit.content) return { ...current, changed: false };
-      await snapshotProject(project, dir, 'before-editor-save');
-      const file = await writeEditorFile(dir, edit);
-      // Publish the new archive/manifest together by switching the row only after both verify.
-      // In particular, do not overwrite working.tgz if its companion upload might still fail.
-      const nextPath = `projects/${project.userId}/${id}/edits/${crypto.randomUUID()}/working.tgz`;
-      let stored;
-      let publishing = false;
-      try {
-        stored = await persistWorkingTree({ ...project, storagePath: nextPath }, dir);
-        publishing = true;
-        await dbUpsertProject({
-          ...project, storagePath: stored.storagePath, fileCount: stored.manifest.fileCount,
-          updatedAt: nowIso(), lastLocalChangeAt: nowIso(), syncState: 'local',
-          syncMessage: 'Editor changes saved to the project workspace. Push Selected to publish them to GitHub.'
-        });
-      } catch (e) {
-        // A lost database acknowledgement may still mean the pointer was switched. Only
-        // delete staged bytes when we know the row is not using them.
-        const recorded = publishing ? await dbGetProject(id).catch(() => null) : project;
-        if (recorded && recorded.storagePath !== nextPath) {
-          await supabase.storage.from(STORAGE_BUCKET).remove([nextPath, manifestPathFor(nextPath)]).catch(() => {});
+    const result = await withProjectLock(id, async () => {
+      const project = await dbGetProject(id);
+      if (!project || String(project.userId) !== String(req.auth.user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
+      return withWorkspace(project, async dir => {
+        // Snapshot before changing the temporary workspace; a failed save keeps the stored copy.
+        const current = await readEditorFile(dir, edit.path);
+        if (current.sha !== edit.sha) throw new AppError('FILE_CHANGED', 'This file changed since you opened it. Copy your draft, then reopen the file to review the latest version.', { status: 409 });
+        if (current.content === edit.content) return { ...current, changed: false };
+        await snapshotProject(project, dir, 'before-editor-save');
+        const file = await writeEditorFile(dir, edit);
+        // Publish the new archive/manifest together by switching the row only after both verify.
+        // In particular, do not overwrite working.tgz if its companion upload might still fail.
+        const nextPath = `projects/${project.userId}/${id}/edits/${crypto.randomUUID()}/working.tgz`;
+        let stored;
+        let publishing = false;
+        try {
+          stored = await persistWorkingTree({ ...project, storagePath: nextPath }, dir);
+          publishing = true;
+          await dbUpsertProject({
+            ...project, storagePath: stored.storagePath, fileCount: stored.manifest.fileCount,
+            updatedAt: nowIso(), lastLocalChangeAt: nowIso(), syncState: 'local',
+            syncMessage: 'Editor changes saved to the project workspace. Push Selected to publish them to GitHub.'
+          });
+        } catch (e) {
+          // A lost database acknowledgement may still mean the pointer was switched. Only
+          // delete staged bytes when we know the row is not using them.
+          const recorded = publishing ? await dbGetProject(id).catch(() => null) : project;
+          if (recorded && recorded.storagePath !== nextPath) {
+            await supabase.storage.from(STORAGE_BUCKET).remove([nextPath, manifestPathFor(nextPath)]).catch(() => {});
+          }
+          throw e;
         }
-        throw e;
-      }
-      if (project.storagePath) {
-        const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([project.storagePath, manifestPathFor(project.storagePath)]).catch(error => ({ error }));
-        if (error) console.warn(`Editor ${id}: superseded workspace cleanup failed.`);
-      }
-      return file;
+        if (project.storagePath) {
+          const { error } = await supabase.storage.from(STORAGE_BUCKET).remove([project.storagePath, manifestPathFor(project.storagePath)]).catch(error => ({ error }));
+          if (error) console.warn(`Editor ${id}: superseded workspace cleanup failed.`);
+        }
+        return file;
+      });
     });
     if (result.changed) broadcast(req.auth.user.id, { type: 'project-updated', projectId: id, reason: 'editor-save' });
     res.json(result);
@@ -1415,7 +1492,7 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
   }
 }));
 
-async function syncProjectForUser(user, project) {
+async function syncProjectForUser(user, project, { background = false } = {}) {
   if (!project.repoFullName) return;
   await withProjectLock(project.id, async () => {
     project = await dbGetProject(project.id);
@@ -1428,6 +1505,24 @@ async function syncProjectForUser(user, project) {
     const token = await userToken(user);
     if (!token) return;
     try {
+      // On routine polling, inspect the remote ref before downloading / verifying a large
+      // cloud archive and starting Git. A manual Fetch Changes still performs the full check.
+      if (background && project.storagePath && ['synced', 'local'].includes(project.syncState)) {
+        const known = lastKnownCommit(project);
+        if (known && /^[0-9a-f]{40,64}$/.test(known)) {
+          try {
+            const ref = await githubFetch(
+              remoteRefUrl(project.repoFullName, branch),
+              { headers: githubHeaders(token) }
+            );
+            if (remoteMatchesKnownCommit(ref, known)) return;
+          } catch (error) {
+            // A ref check can be unavailable even while git fetch works (or the ref
+            // was removed). Fall back to the existing verified sync, never assume equal.
+            console.warn(`Sync ${project.id}: remote preflight unavailable (${error.code || error.message}); checking with Git.`);
+          }
+        }
+      }
       await withWorkspace(project, async dir => {
         await ensureGit(dir, project.remoteUrl);
         // Pull only when the stored copy is unchanged since the last push/pull; never merge over local edits.
@@ -1467,27 +1562,22 @@ async function syncAll() {
   if (syncRunning || !supabase) return;
   syncRunning = true;
   try {
-    const users = await dbListUsers();
-    for (const user of users) {
-      if (!user.githubTokenEnc) continue;
+    // Fetch all connected projects at once instead of querying projects separately
+    // for every user on every polling interval.
+    const [users, projects] = await Promise.all([dbListUsers(), dbListConnectedProjects()]);
+    const owners = new Map(users.filter(user => user.githubTokenEnc).map(user => [String(user.id), user]));
+    for (const project of projects) {
+      const user = owners.get(String(project.userId));
+      if (!user) continue;
+      // Routine polling competes fairly for the same slots as user-triggered work.
+      const slot = JOB_GATE.tryAcquire(BACKGROUND_JOB_KEY);
+      if (!slot.ok) continue;
       try {
-        const projects = await dbListProjects(user.id);
-        for (const project of projects) {
-          if (!project.repoFullName) continue;
-          // Background sync counts toward MAX_CONCURRENT_JOBS like user jobs (at most one slot,
-          // keyed separately from users). When the server is busy the project waits for the next cycle.
-          const slot = JOB_GATE.tryAcquire(BACKGROUND_JOB_KEY);
-          if (!slot.ok) continue;
-          try {
-            await syncProjectForUser(user, project);
-          } catch (e) {
-            console.error(`Auto-sync failed for project ${project.id}:`, e.message);
-          } finally {
-            slot.release();
-          }
-        }
+        await syncProjectForUser(user, project, { background: true });
       } catch (e) {
-        console.error(`Auto-sync failed for user ${user.id}:`, e.message);
+        console.error(`Auto-sync failed for project ${project.id}:`, e.message);
+      } finally {
+        slot.release();
       }
     }
   } catch (e) {

@@ -37,3 +37,7 @@ git diff --check
 Tests cover real Git push/pull behavior with local remotes, authenticated HTTP routes against mocked persistence, file editing and ownership, stale versions, binary/large files, upload failure recovery, and exact custom commit messages.
 
 The [user guide](docs/USER_GUIDE.md) describes snapshots and conflict handling. Native desktop/Android packaging and the PWA use the GitHub Pusher Studio name; existing app IDs, OAuth callback schemes, repository URLs and installer filenames are preserved for compatibility.
+
+## Responsiveness update
+
+For startup, editor caching and background-sync optimizations derived from master, see [PERFORMANCE_FIXES.md](PERFORMANCE_FIXES.md). These improve responses while Render is awake; they cannot prevent Free-plan cold starts.
