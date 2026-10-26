@@ -11,8 +11,10 @@ create table if not exists public.users (
   github_refresh_token_enc text,
   github_expires_at timestamptz,
   github_refresh_expires_at timestamptz,
+  github_private_repos_enabled boolean not null default false,
   updated_at timestamptz not null default now()
 );
+alter table public.users add column if not exists github_private_repos_enabled boolean not null default false;
 
 create table if not exists public.sessions (
   id text primary key,
@@ -28,11 +30,13 @@ create table if not exists public.oauth_attempts (
   code_verifier text not null,
   return_to text,
   client_cookie_hash text not null,
+  private_repos_requested boolean not null default false,
   created_at timestamptz not null default now(),
   expires_at timestamptz not null
 );
 create index if not exists oauth_attempts_expires_at_idx on public.oauth_attempts(expires_at);
 alter table public.oauth_attempts add column if not exists client_cookie_hash text;
+alter table public.oauth_attempts add column if not exists private_repos_requested boolean not null default false;
 
 create table if not exists public.login_codes (
   code_hash text primary key,
@@ -78,6 +82,17 @@ alter table public.projects add column if not exists last_local_change_at timest
 alter table public.projects add column if not exists last_github_change_at timestamptz;
 create index if not exists projects_user_id_idx on public.projects(user_id);
 
+create table if not exists public.project_branches (
+  project_id uuid not null references public.projects(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  branch_name text not null,
+  commit_sha text not null,
+  storage_path text not null,
+  updated_at timestamptz not null default now(),
+  primary key (project_id, branch_name)
+);
+create index if not exists project_branches_user_id_idx on public.project_branches(user_id);
+
 create table if not exists public.snapshots (
   id uuid primary key,
   project_id uuid not null references public.projects(id) on delete cascade,
@@ -98,6 +113,7 @@ alter table public.oauth_attempts enable row level security;
 alter table public.login_codes enable row level security;
 alter table public.sse_tickets enable row level security;
 alter table public.projects enable row level security;
+alter table public.project_branches enable row level security;
 alter table public.snapshots enable row level security;
 
 -- Private object bucket for project archives and snapshots.

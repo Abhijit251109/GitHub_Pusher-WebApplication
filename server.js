@@ -64,10 +64,16 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
-// Least privilege by default. Adding delete_repo (opt-in) lets a failed first push delete the empty
-// repository it created, at the cost of every stored token being able to delete the user's
-// repositories; see SECURITY.md.
-const GITHUB_SCOPE = process.env.GITHUB_OAUTH_SCOPE || 'repo offline_access';
+// Use public_repo by default and request repo only after explicit private-repository consent.
+// A pre-existing token may still have delete_repo, but this app never requests that scope.
+const GITHUB_PUBLIC_SCOPE = 'public_repo';
+const GITHUB_PRIVATE_SCOPE = 'repo';
+function assertGitHubRepoAccess(user, repo) {
+  if (repo?.private && user.privateReposEnabled !== true) {
+    throw new AppError('PRIVATE_REPO_PERMISSION_REQUIRED', 'Grant private repository access from My GitHub Projects before using this repository.', { status: 403 });
+  }
+  return repo;
+}
 
 const TRUST_PROXY = parseTrustProxy(process.env.TRUST_PROXY);
 if (TRUST_PROXY !== undefined) app.set('trust proxy', TRUST_PROXY);
@@ -261,7 +267,8 @@ function userFromRow(row) {
     id: String(row.id), login: row.login, name: row.name, avatar: row.avatar,
     githubTokenEnc: row.github_token_enc, githubRefreshTokenEnc: row.github_refresh_token_enc,
     githubExpiresAt: row.github_expires_at ? new Date(row.github_expires_at).getTime() : null,
-    githubRefreshExpiresAt: row.github_refresh_expires_at ? new Date(row.github_refresh_expires_at).getTime() : null
+    githubRefreshExpiresAt: row.github_refresh_expires_at ? new Date(row.github_refresh_expires_at).getTime() : null,
+    privateReposEnabled: row.github_private_repos_enabled === true
   };
 }
 function projectFromRow(row) {
@@ -293,6 +300,7 @@ async function dbUserUpsert(user) {
     github_token_enc: user.githubTokenEnc, github_refresh_token_enc: user.githubRefreshTokenEnc || null,
     github_expires_at: user.githubExpiresAt ? new Date(user.githubExpiresAt).toISOString() : null,
     github_refresh_expires_at: user.githubRefreshExpiresAt ? new Date(user.githubRefreshExpiresAt).toISOString() : null,
+    github_private_repos_enabled: user.privateReposEnabled === true,
     updated_at: nowIso()
   };
   await queryOne('users', db => db.from('users').upsert(row, { onConflict: 'id' }));
@@ -330,6 +338,18 @@ async function dbUpsertProject(project) {
 }
 async function dbDeleteProject(projectId, userId) {
   await queryOne('projects', db => db.from('projects').delete().eq('id', projectId).eq('user_id', String(userId)));
+}
+async function dbUpsertProjectBranch({ projectId, userId, branch, commitSha, storagePath }) {
+  await queryOne('project_branches', db => db.from('project_branches').upsert({
+    project_id: projectId, user_id: String(userId), branch_name: branch,
+    commit_sha: commitSha, storage_path: storagePath, updated_at: nowIso()
+  }, { onConflict: 'project_id,branch_name' }));
+}
+async function dbGetProjectBranch(projectId, userId, branch) {
+  return queryOne('project_branches', db => db.from('project_branches').select('branch_name,commit_sha,storage_path').eq('project_id', projectId).eq('user_id', String(userId)).eq('branch_name', branch).maybeSingle());
+}
+async function dbListProjectBranches(projectId, userId) {
+  return queryOne('project_branches', db => db.from('project_branches').select('branch_name,commit_sha,storage_path').eq('project_id', projectId).eq('user_id', String(userId)));
 }
 async function dbListUsers() {
   const data = await queryOne('users', db => db.from('users').select('*'));
@@ -392,10 +412,11 @@ async function authUser(req, res, required = true) {
   return { ...session, user: session.user };
 }
 
-async function createOAuthAttempt(state, codeVerifier, returnTo, browserBinding) {
+async function createOAuthAttempt(state, codeVerifier, returnTo, browserBinding, privateReposRequested) {
   await queryOne('oauth_attempts', db => db.from('oauth_attempts').insert({
     state_hash: hashSecret(state), code_verifier: codeVerifier, return_to: returnTo,
     client_cookie_hash: hashSecret(browserBinding),
+    private_repos_requested: privateReposRequested,
     created_at: nowIso(), expires_at: new Date(Date.now() + OAUTH_ATTEMPT_TTL_MS).toISOString()
   }));
 }
@@ -849,6 +870,7 @@ const pushLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_PUSH_P
 const fetchLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_FETCH_PER_15_MIN', 30), key: 'user' });
 const editorLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_EDITOR_PER_15_MIN', 300), key: 'user' });
 const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_UPLOAD_PER_15_MIN', 10), key: 'user' });
+const cloneLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_CLONE_PER_15_MIN', 10), key: 'user' });
 const heavyJob = jobSlot(JOB_GATE);
 app.use('/api', apiLimit);
 
@@ -938,7 +960,7 @@ app.get('/api/auth/me', async (req, res) => {
   try {
     const a = await authUser(req, res, false);
     if (!a) return res.json({ authenticated: false });
-    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar } });
+    return res.json({ authenticated: true, user: { login: a.user.login, name: a.user.name, avatar: a.user.avatar, privateReposEnabled: a.user.privateReposEnabled === true } });
   } catch (e) { sendError(res, e, 'Session check'); }
 });
 app.get('/login', (req, res) => res.sendFile(path.join(ROOT, 'public', 'login.html')));
@@ -947,6 +969,7 @@ app.get('/api/auth/login', authLimit, async (req, res) => {
     if (!process.env.GITHUB_CLIENT_ID || !process.env.GITHUB_CLIENT_SECRET) return res.status(503).send('GitHub OAuth is not configured on this server.');
     supabaseRequired();
     const nativeClient = String(req.query.client || '').toLowerCase();
+    const privateReposRequested = ['1', 'true'].includes(String(req.query.private_repos || '').toLowerCase());
     const isNativeClient = nativeClient === 'android' || nativeClient === 'desktop';
     let returnTo;
     if (isNativeClient) {
@@ -965,13 +988,13 @@ app.get('/api/auth/login', authLimit, async (req, res) => {
     const codeVerifier = randomToken(32);
     const browserBinding = randomToken(24);
     const challenge = crypto.createHash('sha256').update(codeVerifier).digest('base64url');
-    await createOAuthAttempt(state, codeVerifier, returnTo, browserBinding);
+    await createOAuthAttempt(state, codeVerifier, returnTo, browserBinding, privateReposRequested);
     res.setHeader('Set-Cookie', `${OAUTH_BINDING_COOKIE}=${browserBinding}; ${oauthBindingCookieOptions()}`);
     const redirectUri = process.env.GITHUB_CALLBACK_URL || `${publicBaseUrl(req)}/auth/github/callback`;
     const u = new URL('https://github.com/login/oauth/authorize');
     u.searchParams.set('client_id', process.env.GITHUB_CLIENT_ID);
     u.searchParams.set('redirect_uri', redirectUri);
-    u.searchParams.set('scope', GITHUB_SCOPE);
+    u.searchParams.set('scope', privateReposRequested ? GITHUB_PRIVATE_SCOPE : GITHUB_PUBLIC_SCOPE);
     u.searchParams.set('state', state);
     u.searchParams.set('code_challenge', challenge);
     u.searchParams.set('code_challenge_method', 'S256');
@@ -1011,7 +1034,8 @@ app.get('/auth/github/callback', authLimit, async (req, res) => {
       githubTokenEnc: encrypt(tokenData.access_token),
       githubRefreshTokenEnc: tokenData.refresh_token ? encrypt(tokenData.refresh_token) : null,
       githubExpiresAt: tokenData.expires_in ? Date.now() + Number(tokenData.expires_in) * 1000 : null,
-      githubRefreshExpiresAt: tokenData.refresh_token_expires_in ? Date.now() + Number(tokenData.refresh_token_expires_in) * 1000 : null
+      githubRefreshExpiresAt: tokenData.refresh_token_expires_in ? Date.now() + Number(tokenData.refresh_token_expires_in) * 1000 : null,
+      privateReposEnabled: attempt.private_repos_requested === true
     };
     await dbUserUpsert(user);
     if (attempt.return_to) {
@@ -1207,10 +1231,11 @@ app.delete('/api/projects/:id', ensureRequestProtection, async (req, res) => {
     await withProjectLock(project.id, async () => {
       await evictEditorWorkspace(project.id);
       const snapshots = await queryOne('snapshots', db => db.from('snapshots').select('storage_path').eq('project_id', project.id));
+      const branches = await dbListProjectBranches(project.id, a.user.id);
       // Rows go first: a failed row delete must never leave a project pointing at removed storage.
       if (snapshots?.length) await queryOne('snapshots', db => db.from('snapshots').delete().eq('project_id', project.id));
       await dbDeleteProject(project.id, a.user.id);
-      const known = [project.storagePath, project.storagePath && manifestPathFor(project.storagePath), ...(snapshots || []).map(x => x.storage_path)].filter(Boolean);
+      const known = [project.storagePath, project.storagePath && manifestPathFor(project.storagePath), ...(branches || []).flatMap(x => [x.storage_path, manifestPathFor(x.storage_path)]), ...(snapshots || []).map(x => x.storage_path)].filter(Boolean);
       leftover = await removeProjectObjects(project, known);
     });
     broadcast(a.user.id, { type: 'projects-changed' });
@@ -1310,14 +1335,231 @@ app.get('/api/github/repos', async (req, res) => {
   try {
     const token = await userToken(a.user);
     const repos = [];
-    for (let page = 1; page <= 10; page++) {
+    for (let page = 1; ; page++) {
       const data = await githubFetch(`https://api.github.com/user/repos?per_page=100&sort=updated&page=${page}`, { headers: githubHeaders(token) });
       repos.push(...data);
       if (data.length < 100) break;
     }
-    res.json(repos.map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
+    res.json(repos.filter(r => a.user.privateReposEnabled || !r.private).map(r => ({ id: r.id, name: r.name, full_name: r.full_name, private: r.private, clone_url: r.clone_url, default_branch: r.default_branch, html_url: r.html_url })));
   } catch (e) { sendError(res, e, 'List GitHub repositories'); }
 });
+async function listGitHubBranches(token, repo) {
+  const branches = [];
+  const [owner, name, ...extra] = String(repo.full_name || '').split('/');
+  if (!owner || !name || extra.length) throw new AppError('GITHUB_INVALID_RESPONSE', 'GitHub returned an invalid repository name.', { status: 502 });
+  for (let page = 1; ; page++) {
+    const data = await githubFetch(`https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/branches?per_page=100&page=${page}`, { headers: githubHeaders(token) });
+    if (!Array.isArray(data)) throw new AppError('GITHUB_INVALID_RESPONSE', 'GitHub returned an invalid branch list.', { status: 502 });
+    for (const branch of data) {
+      if (typeof branch.name !== 'string' || !/^[0-9a-f]{40,64}$/i.test(branch.commit?.sha || '')) {
+        throw new AppError('GITHUB_INVALID_RESPONSE', 'GitHub returned invalid branch information.', { status: 502 });
+      }
+      branches.push({ name: branch.name, commitSha: branch.commit.sha });
+    }
+    if (data.length < 100) break;
+  }
+  return branches;
+}
+app.get('/api/github/branches', async (req, res) => {
+  const a = await authUser(req, res); if (!a) return;
+  try {
+    const repoId = parseRepoId(req.query.repoId);
+    if (!repoId) throw new AppError('INVALID_REPO_ID', 'Select a GitHub repository.');
+    const token = await userToken(a.user);
+    if (!token) throw new AppError('GITHUB_NOT_CONNECTED', 'Connect GitHub before listing branches.', { status: 401 });
+    const repo = assertGitHubRepoAccess(a.user, await githubFetch(`https://api.github.com/repositories/${repoId}`, { headers: githubHeaders(token) }));
+    res.json({ defaultBranch: repo.default_branch, branches: await listGitHubBranches(token, repo) });
+  } catch (e) { sendError(res, e, 'List GitHub branches'); }
+});
+app.post('/api/github/clone', ensureRequestProtection, requireUser, cloneLimit, heavyJob, runJob(async (req, res) => {
+  res.setTimeout(600000);
+  const user = req.auth.user;
+  let workspace;
+  let project;
+  let projectSaved = false;
+  const storedPaths = new Set();
+  const branchRows = [];
+  try {
+    const repoId = parseRepoId(req.body?.repoId);
+    if (!repoId) throw new AppError('INVALID_REPO_ID', 'Select a GitHub repository.');
+    const token = await userToken(user);
+    if (!token) throw new AppError('GITHUB_NOT_CONNECTED', 'Connect GitHub before cloning a repository.', { status: 401 });
+    const repo = assertGitHubRepoAccess(user, await githubFetch(`https://api.github.com/repositories/${repoId}`, { headers: githubHeaders(token) }));
+    const existing = (await dbListProjects(user.id)).find(p => String(p.repoId) === String(repo.id) || p.repoFullName?.toLowerCase() === repo.full_name.toLowerCase());
+    if (existing) return res.json({ existing: true, project: { ...existing, files: existing.fileCount } });
+    if (!repo.default_branch) throw new AppError('EMPTY_REPOSITORY', 'This repository has no default branch to clone.', { status: 422 });
+    const allBranches = req.body?.allBranches === true;
+    const branch = parseBranch(allBranches ? repo.default_branch : (req.body?.branch || repo.default_branch));
+    const branches = await listGitHubBranches(token, repo);
+    const defaultBranch = branches.find(item => item.name === repo.default_branch);
+    if (!defaultBranch) throw new AppError('DEFAULT_BRANCH_NOT_FOUND', 'The repository default branch was not present in its active branch list.', { status: 502 });
+    const selectedBranch = branches.find(item => item.name === branch);
+    if (!selectedBranch) throw new AppError('BRANCH_NOT_FOUND', `Branch "${branch}" does not exist in ${repo.full_name}.`, { status: 404 });
+    const cloneUrl = new URL(repo.clone_url);
+    if (cloneUrl.protocol !== 'https:' || cloneUrl.hostname !== 'github.com' || cloneUrl.username || cloneUrl.password || !/^[^/]+\/[^/]+$/.test(repo.full_name)) {
+      throw new AppError('INVALID_REPOSITORY_URL', 'GitHub returned an invalid clone URL.', { status: 502 });
+    }
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-clone-'));
+    const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
+    if (allBranches) {
+      for (const item of branches) await runGit(workspace, ['check-ref-format', '--branch', item.name], {}, { signal: deadline });
+      await runGit(workspace, ['clone', '--depth=1', '--no-checkout', '--no-single-branch', cloneUrl.href, '.'], gitAuthEnv(token), { signal: deadline });
+    } else {
+      await runGit(workspace, ['check-ref-format', '--branch', branch], {}, { signal: deadline });
+      await runGit(workspace, ['clone', '--depth=1', '--single-branch', '--branch', branch, cloneUrl.href, '.'], gitAuthEnv(token), { signal: deadline });
+    }
+    const now = nowIso();
+    const id = crypto.randomUUID();
+    const projectRoot = `projects/${user.id}/${id}`;
+    const archivePath = name => name === repo.default_branch
+      ? `${projectRoot}/working.tgz`
+      : `${projectRoot}/branches/${crypto.createHash('sha256').update(name).digest('hex')}.tgz`;
+    const activeBranch = allBranches ? repo.default_branch : branch;
+    const storagePath = archivePath(activeBranch);
+    project = {
+      id, userId: user.id, name: normalizeName(repo.name), createdAt: now, updatedAt: now,
+      syncState: 'synced', syncMessage: 'Cloned from GitHub.', repoId: String(repo.id),
+      repoFullName: repo.full_name, repoUrl: repo.html_url, remoteUrl: cloneUrl.href, branch: activeBranch,
+      lastPulledCommit: null, lastCheckedAt: now, lastGithubChangeAt: now,
+      fileCount: 0, storagePath
+    };
+    const importedBranches = allBranches ? branches : [selectedBranch];
+    let totalBytes = 0;
+    for (const item of importedBranches) {
+      const branchName = parseBranch(item.name);
+      const ref = `refs/remotes/origin/${branchName}`;
+      if (allBranches) {
+        await runGit(workspace, ['clean', '-fdx'], {}, { signal: deadline });
+        await runGit(workspace, ['checkout', '--force', '--detach', ref], {}, { signal: deadline });
+      }
+      const { stdout } = await runGit(workspace, ['rev-parse', 'HEAD'], {}, { signal: deadline });
+      const head = stdout.trim();
+      if (!/^[0-9a-f]{40,64}$/i.test(head) || head !== item.commitSha) {
+        throw new AppError('BRANCH_MOVED', `Branch "${branchName}" changed on GitHub while it was being cloned. Retry the clone to import a consistent branch.`, { status: 409 });
+      }
+      const branchStoragePath = archivePath(branchName);
+      storedPaths.add(branchStoragePath);
+      storedPaths.add(manifestPathFor(branchStoragePath));
+      const persisted = await persistWorkingTree({ ...project, branch: branchName, storagePath: branchStoragePath }, workspace);
+      totalBytes += persisted.manifest.totalBytes;
+      if (totalBytes > MAX_EXTRACTED_BYTES) throw new AppError('CLONE_ALL_TOO_LARGE', `The active branches together exceed the ${Math.round(MAX_EXTRACTED_BYTES / 1024 / 1024)} MB total import limit. Clone one branch at a time instead.`, { status: 413 });
+      branchRows.push({
+        projectId: id, userId: user.id, branch: branchName,
+        commitSha: head, storagePath: branchStoragePath
+      });
+      if (branchName === activeBranch) {
+        project.lastPulledCommit = head;
+        project.fileCount = persisted.manifest.fileCount;
+      }
+    }
+    await dbUpsertProject(project);
+    for (const row of branchRows) await dbUpsertProjectBranch(row);
+    projectSaved = true;
+    broadcast(user.id, { type: 'projects-changed', projectId: id });
+    res.json({ existing: false, importedBranches: importedBranches.length, project: { ...project, files: project.fileCount } });
+  } catch (e) {
+    let projectRemoved = true;
+    if (project && !projectSaved) {
+      try { await dbDeleteProject(project.id, user.id); }
+      catch (cleanupError) {
+        projectRemoved = false;
+        console.error(`Clone ${project.repoFullName}: project cleanup failed: ${cleanupError.message}`);
+      }
+    }
+    if (!projectSaved && projectRemoved && storedPaths.size) await storageRemove([...storedPaths]).catch(cleanupError => console.error(`Clone ${project?.repoFullName}: storage cleanup failed: ${cleanupError.message}`));
+    sendError(res, e, `Clone GitHub repository${project?.repoFullName ? ` ${project.repoFullName}` : ''}`, 'The repository could not be cloned into your app.');
+  } finally {
+    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(error => console.error(`GitHub clone workspace cleanup failed: ${error.message}`));
+  }
+}));
+app.post('/api/github/switch-branch', ensureRequestProtection, requireUser, cloneLimit, heavyJob, runJob(async (req, res) => {
+  res.setTimeout(600000);
+  const user = req.auth.user;
+  let workspace;
+  let nextStoragePath;
+  let project;
+  try {
+    const projectId = parseProjectId(req.body?.projectId);
+    const branch = parseBranch(req.body?.branch);
+    await withProjectLock(projectId, async () => {
+      project = await dbGetProject(projectId);
+      if (!project || String(project.userId) !== String(user.id)) throw new AppError('PROJECT_NOT_FOUND', 'Project not found.', { status: 404 });
+      if (!project.repoId || !project.repoFullName) throw new AppError('PROJECT_NOT_CONNECTED', 'Connect this project to a GitHub repository before switching branches.', { status: 400 });
+      if (branch === project.branch) {
+        return;
+      }
+      const token = await userToken(user);
+      if (!token) throw new AppError('GITHUB_NOT_CONNECTED', 'Connect GitHub before switching branches.', { status: 401 });
+      const repo = assertGitHubRepoAccess(user, await githubFetch(`https://api.github.com/repositories/${project.repoId}`, { headers: githubHeaders(token) }));
+      if (repo.full_name.toLowerCase() !== project.repoFullName.toLowerCase()) throw new AppError('PROJECT_REPOSITORY_MISMATCH', 'The linked GitHub repository no longer matches this project.', { status: 409 });
+      const branches = await listGitHubBranches(token, repo);
+      const branchInfo = branches.find(item => item.name === branch);
+      if (!branchInfo) throw new AppError('BRANCH_NOT_FOUND', `Branch "${branch}" does not exist in ${repo.full_name}.`, { status: 404 });
+      await withWorkspace(project, dir => snapshotProject(project, dir, `before-branch-${normalizeName(branch)}`));
+      const knownCommit = lastKnownCommit(project);
+      if (knownCommit && project.storagePath) {
+        await dbUpsertProjectBranch({
+          projectId, userId: user.id, branch: project.branch,
+          commitSha: knownCommit, storagePath: project.storagePath
+        });
+      }
+      const cached = await dbGetProjectBranch(project.id, user.id, branch);
+      let cachedFileCount = 0;
+      let useCache = Boolean(cached && cached.commit_sha === branchInfo.commitSha);
+      if (useCache) {
+        workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-branch-'));
+        try {
+          const manifest = await loadManifest(cached.storage_path);
+          await extractArchive(await storageDownload(cached.storage_path), workspace);
+          const verified = await verifyRestoredWorkspace(workspace, manifest);
+          cachedFileCount = verified.fileCount;
+        } catch (error) {
+          console.warn(`Branch switch ${project.id}: cached ${branch} archive unavailable; fetching from GitHub (${error.message}).`);
+          await fs.rm(workspace, { recursive: true, force: true }).catch(cleanupError => console.error(`Branch switch workspace cleanup failed: ${cleanupError.message}`));
+          workspace = null;
+          useCache = false;
+        }
+      }
+      const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
+      const cloneUrl = new URL(repo.clone_url);
+      if (cloneUrl.protocol !== 'https:' || cloneUrl.hostname !== 'github.com') throw new AppError('INVALID_REPOSITORY_URL', 'GitHub returned an invalid clone URL.', { status: 502 });
+      let head = branchInfo.commitSha;
+      if (!useCache) {
+        workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-branch-'));
+        await runGit(workspace, ['check-ref-format', '--branch', branch], {}, { signal: deadline });
+        await runGit(workspace, ['clone', '--depth=1', '--single-branch', '--branch', branch, cloneUrl.href, '.'], gitAuthEnv(token), { signal: deadline });
+        const result = await runGit(workspace, ['rev-parse', 'HEAD'], {}, { signal: deadline });
+        head = result.stdout.trim();
+        if (!/^[0-9a-f]{40,64}$/i.test(head) || head !== branchInfo.commitSha) {
+          throw new AppError('BRANCH_MOVED', `Branch "${branch}" changed on GitHub while it was being switched. Retry the operation.`, { status: 409 });
+        }
+        nextStoragePath = `projects/${user.id}/${project.id}/branches/${crypto.createHash('sha256').update(branch).digest('hex')}.tgz`;
+        await persistWorkingTree({ ...project, branch, storagePath: nextStoragePath }, workspace);
+      }
+      const branchStoragePath = useCache ? cached.storage_path : nextStoragePath;
+      const now = nowIso();
+      const updated = {
+        ...project, branch, storagePath: branchStoragePath, fileCount: useCache ? cachedFileCount : await countFiles(workspace, { includeGit: false, includeSkipped: false }),
+        syncState: 'synced', syncMessage: `Switched to ${branch}.`, lastPulledCommit: head,
+        lastSyncAt: now, lastCheckedAt: now, lastGithubChangeAt: now, updatedAt: now
+      };
+      await dbUpsertProject(updated);
+      nextStoragePath = null;
+      project = updated;
+      if (!useCache) {
+        try { await dbUpsertProjectBranch({ projectId, userId: user.id, branch, commitSha: head, storagePath: branchStoragePath }); }
+        catch (error) { console.error(`Branch switch ${project.id}: branch cache could not be recorded: ${error.message}`); }
+      }
+      broadcast(user.id, { type: 'project-updated', projectId, reason: 'branch-switch' });
+    });
+    res.json({ project: { ...project, files: project.fileCount } });
+  } catch (e) {
+    if (nextStoragePath) await storageRemove([nextStoragePath, manifestPathFor(nextStoragePath)]).catch(error => console.error(`Branch switch archive cleanup failed: ${error.message}`));
+    sendError(res, e, 'Switch GitHub branch');
+  } finally {
+    if (workspace) await fs.rm(workspace, { recursive: true, force: true }).catch(error => console.error(`Branch switch workspace cleanup failed: ${error.message}`));
+  }
+}));
 app.post('/api/github/fetch', ensureRequestProtection, requireUser, fetchLimit, heavyJob, runJob(async (req, res) => {
   res.setTimeout(600000); // 10 minutes for large project fetch
   const a = req.auth;
@@ -1376,6 +1618,9 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
     // Checked before any heavy work so a bad name is a quick 400.
     if (!repoId) assertRepoName(normalizeName(repoName || project.name));
+    if (!repoId && visibility === 'private' && a.user.privateReposEnabled !== true) {
+      return res.status(403).json({ error: 'Grant private repository access from My GitHub Projects before creating a private repository.', code: 'PRIVATE_REPO_PERMISSION_REQUIRED' });
+    }
     const token = await userToken(a.user);
     if (!token) throw new PushError('GITHUB_NOT_CONNECTED', 'Connect GitHub before pushing.', { status: 401 });
     const github = (url, options = {}) => githubFetch(url, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } });
@@ -1398,12 +1643,12 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
           log: line => console.log(`Push ${project.id}: ${line}`),
           // Called only after the workspace has been restored and verified.
           async resolveRepo() {
-            if (repoId) return { repo: await github(`https://api.github.com/repositories/${repoId}`), created: false };
+            if (repoId) return { repo: assertGitHubRepoAccess(a.user, await github(`https://api.github.com/repositories/${repoId}`)), created: false };
             const name = normalizeName(repoName || project.name);
             let scopes = null;
             const login = (await github('https://api.github.com/user', { onResponse: r => { scopes = r.headers.get('x-oauth-scopes'); } })).login;
             try {
-              return { repo: await github(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`), created: false };
+              return { repo: assertGitHubRepoAccess(a.user, await github(`https://api.github.com/repos/${encodeURIComponent(login)}/${encodeURIComponent(name)}`)), created: false };
             } catch (e) {
               if (e.status !== 404) throw e;
             }
@@ -1492,21 +1737,102 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
   }
 }));
 
-async function syncProjectForUser(user, project, { background = false } = {}) {
+async function syncArchivedBranches(user, project, repo, token, activeBranch, branches) {
+  const cachedBranches = await dbListProjectBranches(project.id, user.id);
+  const cachedByName = new Map((cachedBranches || []).map(item => [item.branch_name, item]));
+  const cloneUrl = new URL(repo.clone_url);
+  if (cloneUrl.protocol !== 'https:' || cloneUrl.hostname !== 'github.com' || cloneUrl.username || cloneUrl.password) {
+    throw new AppError('INVALID_REPOSITORY_URL', 'GitHub returned an invalid clone URL.', { status: 502 });
+  }
+  const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
+  const result = { imported: [], updated: [], conflicts: [] };
+  for (const item of branches) {
+    const branch = parseBranch(item.name);
+    if (branch === activeBranch) continue;
+    const cached = cachedByName.get(branch);
+    if (cached?.commit_sha === item.commitSha) continue;
+    const storagePath = cached?.storage_path
+      || `projects/${user.id}/${project.id}/branches/${crypto.createHash('sha256').update(branch).digest('hex')}.tgz`;
+    if (!cached) {
+      const workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'gpp-auto-branch-'));
+      let archivePublished = false;
+      try {
+        await runGit(workspace, ['check-ref-format', '--branch', branch], {}, { signal: deadline });
+        await runGit(workspace, ['clone', '--depth=1', '--single-branch', '--branch', branch, cloneUrl.href, '.'], gitAuthEnv(token), { signal: deadline });
+        const head = (await runGit(workspace, ['rev-parse', 'HEAD'], {}, { signal: deadline })).stdout.trim();
+        if (!/^[0-9a-f]{40,64}$/i.test(head) || head !== item.commitSha) {
+          throw new AppError('BRANCH_MOVED', `Branch "${branch}" changed on GitHub while it was being imported. It will be checked again automatically.`, { status: 409 });
+        }
+        await persistWorkingTree({ ...project, branch, storagePath }, workspace);
+        archivePublished = true;
+        await dbUpsertProjectBranch({ projectId: project.id, userId: user.id, branch, commitSha: head, storagePath });
+        result.imported.push(branch);
+      } catch (error) {
+        if (archivePublished) await storageRemove([storagePath, manifestPathFor(storagePath)]).catch(cleanupError => console.error(`Branch import archive cleanup failed: ${cleanupError.message}`));
+        throw error;
+      } finally {
+        await fs.rm(workspace, { recursive: true, force: true }).catch(error => console.error(`Branch import workspace cleanup failed: ${error.message}`));
+      }
+      continue;
+    }
+    const branchProject = { ...project, branch, storagePath: cached.storage_path };
+    const outcome = await withWorkspace(branchProject, async dir => {
+      await ensureGit(dir, cloneUrl.href);
+      const plan = await withGitAuth(token, env => planPull({
+        git: (args, opts) => runGit(dir, args, env, { ...opts, signal: deadline }),
+        dir, branch, knownCommit: cached.commit_sha,
+        beforeApply: () => snapshotProject(branchProject, dir, `before-github-sync-${normalizeName(branch)}`)
+      }));
+      if (plan.action !== 'pulled') return plan;
+      const nextStoragePath = `projects/${user.id}/${project.id}/branches/${crypto.createHash('sha256').update(branch).digest('hex')}/${crypto.randomUUID()}.tgz`;
+      try {
+        const persisted = await persistWorkingTree({ ...branchProject, storagePath: nextStoragePath }, dir);
+        await dbUpsertProjectBranch({
+          projectId: project.id, userId: user.id, branch, commitSha: plan.remote,
+          storagePath: persisted.storagePath
+        });
+      } catch (error) {
+        await storageRemove([nextStoragePath, manifestPathFor(nextStoragePath)]).catch(cleanupError => console.error(`Branch sync archive cleanup failed: ${cleanupError.message}`));
+        throw error;
+      }
+      if (cached.storage_path !== persisted.storagePath) {
+        await storageRemove([cached.storage_path, manifestPathFor(cached.storage_path)])
+          .catch(error => console.error(`Branch sync superseded archive cleanup failed: ${error.message}`));
+      }
+      return plan;
+    });
+    if (outcome.action === 'pulled') result.updated.push(branch);
+    else if (outcome.action === 'conflict') result.conflicts.push(branch);
+  }
+  return result;
+}
+
+async function syncProjectForUser(user, project, { background = false, branchLists } = {}) {
   if (!project.repoFullName) return;
   await withProjectLock(project.id, async () => {
     project = await dbGetProject(project.id);
     if (!project || String(project.userId) !== String(user.id)) return;
-    const branch = project.branch || 'main';
-    if (branch !== project.branch) {
-      await updateProject(project.id, user.id, { branch }).catch(e => console.warn(`Failed to set default branch: ${e.message}`));
-      project.branch = branch;
-    }
     const token = await userToken(user);
     if (!token) return;
     try {
+      const repo = await githubFetch(`https://api.github.com/repos/${repoPath(project.repoFullName)}`, { headers: githubHeaders(token) });
+      assertGitHubRepoAccess(user, repo);
+      const branch = project.branch || repo.default_branch || 'main';
+      if (branch !== project.branch) {
+        await updateProject(project.id, user.id, { branch });
+        project.branch = branch;
+      }
+      const cacheKey = `${user.id}:${repo.id}`;
+      let branches = branchLists?.get(cacheKey);
+      if (!branches) {
+        branches = await listGitHubBranches(token, repo);
+        branchLists?.set(cacheKey, branches);
+      }
+      const archived = await syncArchivedBranches(user, project, repo, token, branch, branches);
+      let activeConflict = false;
       // On routine polling, inspect the remote ref before downloading / verifying a large
       // cloud archive and starting Git. A manual Fetch Changes still performs the full check.
+      let skipActiveSync = false;
       if (background && project.storagePath && ['synced', 'local'].includes(project.syncState)) {
         const known = lastKnownCommit(project);
         if (known && /^[0-9a-f]{40,64}$/.test(known)) {
@@ -1515,7 +1841,7 @@ async function syncProjectForUser(user, project, { background = false } = {}) {
               remoteRefUrl(project.repoFullName, branch),
               { headers: githubHeaders(token) }
             );
-            if (remoteMatchesKnownCommit(ref, known)) return;
+            if (remoteMatchesKnownCommit(ref, known)) skipActiveSync = true;
           } catch (error) {
             // A ref check can be unavailable even while git fetch works (or the ref
             // was removed). Fall back to the existing verified sync, never assume equal.
@@ -1523,28 +1849,58 @@ async function syncProjectForUser(user, project, { background = false } = {}) {
           }
         }
       }
-      await withWorkspace(project, async dir => {
+      if (!skipActiveSync) await withWorkspace(project, async dir => {
         await ensureGit(dir, project.remoteUrl);
         // Pull only when the stored copy is unchanged since the last push/pull; never merge over local edits.
         const deadline = AbortSignal.timeout(JOB_TIMEOUT_MS);
-        const plan = await withGitAuth(token, env => planPull({ git: (args, opts) => runGit(dir, args, env, { ...opts, signal: deadline }), dir, branch, knownCommit: lastKnownCommit(project) }));
+        const plan = await withGitAuth(token, env => planPull({
+          git: (args, opts) => runGit(dir, args, env, { ...opts, signal: deadline }),
+          dir, branch, knownCommit: lastKnownCommit(project),
+          beforeApply: () => snapshotProject(project, dir, `before-github-sync-${normalizeName(branch)}`)
+        }));
         if (plan.action === 'none') {
           if (plan.reason === 'remote-branch-missing') throw new AppError('BRANCH_MISSING', `Branch ${branch} no longer exists on GitHub.`);
           return;
         }
         if (plan.action === 'conflict') {
+          activeConflict = true;
           if (project.syncState === 'conflict' && project.syncMessage === plan.reason) return; // already reported
           await updateProject(project.id, user.id, { syncState: 'conflict', syncMessage: plan.reason, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
           broadcast(user.id, { type: 'sync-conflict', projectId: project.id });
           return;
         }
-        await snapshotProject(project, dir, 'after-pull').catch(e => console.warn(`Sync snapshot skipped: ${e.message}`));
         // The pull is only real once the cloud copy holds it; a failed upload is an error, not a footnote.
         const persisted = await persistWorkingTree(project, dir);
         const specialNote = plan.special.length ? ` ${plan.special.length} symbolic link(s) or submodule(s) on GitHub were not copied into the project.` : '';
         await updateProject(project.id, user.id, { storagePath: persisted.storagePath, fileCount: persisted.manifest.fileCount, syncState: 'synced', syncMessage: `Remote changes pulled automatically.${specialNote}`, lastSyncAt: nowIso(), lastPulledCommit: plan.remote, lastCheckedAt: nowIso(), lastGithubChangeAt: nowIso() });
+        await dbUpsertProjectBranch({ projectId: project.id, userId: user.id, branch, commitSha: plan.remote, storagePath: persisted.storagePath });
         broadcast(user.id, { type: 'project-updated', projectId: project.id, reason: 'github-pull' });
       });
+      const branchChangeCount = archived.imported.length + archived.updated.length;
+      if (archived.conflicts.length || branchChangeCount) {
+        const now = nowIso();
+        const conflictMessage = `GitHub updates on ${archived.conflicts.join(', ')} were not applied because those branches contain local edits.`;
+        const patch = {
+          lastCheckedAt: now,
+          ...(branchChangeCount || archived.conflicts.length ? { lastGithubChangeAt: now } : {}),
+          ...(archived.conflicts.length
+            ? { syncState: 'conflict', syncMessage: conflictMessage }
+            : !activeConflict ? {
+              syncState: 'synced',
+              syncMessage: [
+                archived.imported.length ? `Imported new branch${archived.imported.length === 1 ? '' : 'es'}: ${archived.imported.join(', ')}.` : '',
+                archived.updated.length ? `Updated branch${archived.updated.length === 1 ? '' : 'es'}: ${archived.updated.join(', ')}.` : ''
+              ].filter(Boolean).join(' ')
+            } : {})
+        };
+        const current = await dbGetProject(project.id);
+        const conflictChanged = archived.conflicts.length
+          && (current?.syncState !== 'conflict' || current?.syncMessage !== conflictMessage);
+        if (branchChangeCount || conflictChanged) {
+          await updateProject(project.id, user.id, patch);
+          broadcast(user.id, { type: conflictChanged ? 'sync-conflict' : 'project-updated', projectId: project.id, reason: 'github-branches' });
+        }
+      }
     } catch (e) {
       // A stable, client-safe message (no per-error ref) so a repeating failure is reported once.
       const message = e instanceof AppError ? e.message.replace(' Nothing was sent to GitHub.', '') : 'Automatic sync failed because of a server error.';
@@ -1566,6 +1922,7 @@ async function syncAll() {
     // for every user on every polling interval.
     const [users, projects] = await Promise.all([dbListUsers(), dbListConnectedProjects()]);
     const owners = new Map(users.filter(user => user.githubTokenEnc).map(user => [String(user.id), user]));
+    const branchLists = new Map();
     for (const project of projects) {
       const user = owners.get(String(project.userId));
       if (!user) continue;
@@ -1573,7 +1930,7 @@ async function syncAll() {
       const slot = JOB_GATE.tryAcquire(BACKGROUND_JOB_KEY);
       if (!slot.ok) continue;
       try {
-        await syncProjectForUser(user, project, { background: true });
+        await syncProjectForUser(user, project, { background: true, branchLists });
       } catch (e) {
         console.error(`Auto-sync failed for project ${project.id}:`, e.message);
       } finally {

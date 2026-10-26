@@ -273,6 +273,23 @@ test('auto-pull applies remote changes only when the stored copy is unedited', a
   assert.equal(upToDate.plan.action, 'none');
 });
 
+test('auto-pull runs its snapshot hook before changing the workspace', async () => {
+  const remote = await bareRepo();
+  const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'before' } }));
+  await commitToRemote(remote, { 'a.txt': 'after' });
+  const dir = await tmp('sync-snapshot');
+  await write(dir, { 'a.txt': 'before' });
+  await prepareGit(dir, remote);
+  let snapshotContent;
+  const plan = await planPull({
+    git: gitIn(dir), dir, branch: 'main', knownCommit: first.commit,
+    async beforeApply() { snapshotContent = await fs.readFile(path.join(dir, 'a.txt'), 'utf8'); }
+  });
+  assert.equal(plan.action, 'pulled');
+  assert.equal(snapshotContent, 'before');
+  assert.equal(await fs.readFile(path.join(dir, 'a.txt'), 'utf8'), 'after');
+});
+
 test('direct commitAndPush refuses to commit an empty tree', async () => {
   const remote = await bareRepo();
   const dir = await tmp('direct');
