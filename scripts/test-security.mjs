@@ -268,7 +268,7 @@ after(() => { server?.kill(); mock?.close(); });
 const push = (user, body, headers = {}) => fetch(`${base}/api/github/push`, {
   method: 'POST',
   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${user.token}`, ...headers },
-  body: JSON.stringify({ projectId: user.projectId, ...body })
+  body: JSON.stringify({ projectId: user.projectId, visibility: 'public', ...body })
 });
 
 test('e2e 1: an arbitrary *.github.io origin gets no credentialed CORS and fails the origin check', async () => {
@@ -302,6 +302,12 @@ test('e2e 4 and 6: malformed repoId, repoName and branch are rejected with 400 b
     assert.equal((await r.json()).code, code, JSON.stringify(body));
   }
   assert.equal(counters.storageReads, before, 'validation failures must not touch storage');
+});
+
+test('creating a private repository requires explicit private-repository consent', async () => {
+  const response = await push(users.u5, { visibility: 'private' });
+  assert.equal(response.status, 403);
+  assert.equal((await response.json()).code, 'PRIVATE_REPO_PERMISSION_REQUIRED');
 });
 
 test('e2e 3: a storage failure returns a safe message; internals only reach the log', async () => {

@@ -1613,15 +1613,15 @@ app.post('/api/github/push', ensureRequestProtection, requireUser, pushLimit, he
     input = await parsePushRequest(req.body);
   } catch (e) { return sendError(res, e, 'Push request'); }
   const { projectId, repoId, repoName, visibility, branch, conflictResolution, commitMessage } = input;
-  if (!repoId && visibility === 'private' && a.user.privateReposEnabled !== true) {
-    return res.status(403).json({ error: 'Grant private repository access from My GitHub Projects before creating a private repository.', code: 'PRIVATE_REPO_PERMISSION_REQUIRED' });
-  }
   let project;
   try {
     project = await dbGetProject(projectId);
     if (!project || String(project.userId) !== String(a.user.id)) return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
     // Checked before any heavy work so a bad name is a quick 400.
     if (!repoId) assertRepoName(normalizeName(repoName || project.name));
+    if (!repoId && visibility === 'private' && a.user.privateReposEnabled !== true) {
+      return res.status(403).json({ error: 'Grant private repository access from My GitHub Projects before creating a private repository.', code: 'PRIVATE_REPO_PERMISSION_REQUIRED' });
+    }
     const token = await userToken(a.user);
     if (!token) throw new PushError('GITHUB_NOT_CONNECTED', 'Connect GitHub before pushing.', { status: 401 });
     const github = (url, options = {}) => githubFetch(url, { ...options, headers: { ...githubHeaders(token), ...(options.headers || {}) } });

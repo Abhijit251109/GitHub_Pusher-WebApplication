@@ -11,7 +11,16 @@
   const privateReposRequested = ['1', 'true'].includes(String(params.get('private_repos') || '').toLowerCase());
 
   function validBase(base) {
-    try { const u = new URL(base); return /^https?:$/.test(u.protocol); } catch { return false; }
+    try { const u = new URL(base); return /^https?:$/.test(u.protocol) && !u.username && !u.password; } catch { return false; }
+  }
+  function authUrl(base) {
+    const url = new URL(base);
+    if (!/^https?:$/.test(url.protocol) || url.username || url.password) throw new Error('Invalid backend URL.');
+    url.pathname = `${url.pathname.replace(/\/+$/, '')}/api/auth/login`;
+    url.search = '';
+    url.hash = '';
+    if (privateReposRequested) url.searchParams.set('private_repos', '1');
+    return url;
   }
   function backendFromCurrentPage() {
     if (!location.hostname.endsWith('.github.io') && !location.hostname.endsWith('.githubusercontent.com')) return location.origin;
@@ -61,11 +70,16 @@
       }
       sessionStorage.setItem('gpp_mobile_oauth_nonce', mobileNonce);
       localStorage.setItem('gpp_mobile_oauth_nonce', mobileNonce);
-      location.href = `${base}/api/auth/login?client=${client}&mobile_nonce=${encodeURIComponent(mobileNonce)}${privateReposRequested ? '&private_repos=1' : ''}`;
+      const url = authUrl(base);
+      url.searchParams.set('client', client);
+      url.searchParams.set('mobile_nonce', mobileNonce);
+      location.assign(url.href);
       return;
     }
     const returnTo = location.href.split('#')[0];
-    location.href = `${base}/api/auth/login?return_to=${encodeURIComponent(returnTo)}${privateReposRequested ? '&private_repos=1' : ''}`;
+    const url = authUrl(base);
+    url.searchParams.set('return_to', returnTo);
+    location.assign(url.href);
   }
 
   if (code) {
