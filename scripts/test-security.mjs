@@ -83,12 +83,13 @@ test('delete_repo is read from the scope header, and unknown is not treated as g
   assert.equal(tokenCanDeleteRepos(null), null, 'GitHub App tokens send no scope header');
 });
 
-test('the default OAuth scope does not include delete_repo', async () => {
+test('OAuth requests public scopes by default and private scopes only after consent', async () => {
   const source = await fs.readFile(path.join(ROOT, 'server.js'), 'utf8');
-  const fallback = source.match(/GITHUB_OAUTH_SCOPE \|\| '([^']*)'/)[1];
-  assert.equal(fallback, 'repo offline_access');
+  assert.match(source, /const GITHUB_PUBLIC_SCOPE = 'public_repo'/);
+  assert.match(source, /const GITHUB_PRIVATE_SCOPE = 'repo'/);
+  assert.match(source, /privateReposRequested \? GITHUB_PRIVATE_SCOPE : GITHUB_PUBLIC_SCOPE/);
   for (const file of ['render.yaml', '.env.example']) {
-    assert.doesNotMatch(await fs.readFile(path.join(ROOT, file), 'utf8'), /^\s*(value: |GITHUB_OAUTH_SCOPE=).*delete_repo/m, file);
+    assert.doesNotMatch(await fs.readFile(path.join(ROOT, file), 'utf8'), /GITHUB_OAUTH_SCOPE/, file);
   }
 });
 

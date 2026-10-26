@@ -19,18 +19,9 @@ GitHub OAuth uses a server-generated `state` value and PKCE S256, and the OAuth 
 
 ## GitHub scopes
 
-By default the app requests `repo offline_access` (`GITHUB_OAUTH_SCOPE`).
+By default the app requests the `public_repo` scope. It requests the broader `repo` scope only after the user explicitly chooses to enable private-repository access in the app. OAuth scope selection is enforced by the server and is not configured through Render or `.env`.
 
-- `repo` is required: it lets the app list the user's repositories, create a new repository for a first push, and push commits to repositories the user can write to. It also lets a stolen token rewrite those repositories' contents, which is why tokens are encrypted at rest (below).
-- `offline_access` is kept for refresh tokens where GitHub issues them.
-- `delete_repo` is **not** requested by default. It cannot be limited to one repository: a token holding it can permanently delete every repository the user administers. Anyone who obtained a stored token (database plus encryption key, a server compromise, a future injection bug) could then delete the user's repositories instead of only rewriting them.
-
-Trade-off when a first push into a repository the app just created fails:
-
-- Without `delete_repo` (default), the repository is left in place, but never silently. The push first proves git credentials work and stages the files locally, so problems on the server are found before anything is created. If the push still fails, the error names and links the empty repository, and it is linked to the project, so the next push fills it rather than creating another.
-- With `delete_repo` (opt-in: set `GITHUB_OAUTH_SCOPE=repo delete_repo offline_access`), the app deletes that repository, and only after GitHub confirms it has no branches. It never deletes after a timeout or any repository it did not create in the same request. Enable it only for a personal deployment where you accept that risk.
-
-Changing the scope only affects new sign-ins. A token that was already granted `delete_repo` keeps it until the user revokes the app under GitHub **Settings → Applications → Authorized OAuth Apps** and signs in again.
+The `public_repo` grant supports the app's public-repository features. Private repositories are hidden and blocked server-side until the user requests private access and completes GitHub authorization with the `repo` scope. The app does not request `delete_repo`. A token previously authorized with broader repository access may retain that grant until the user revokes the app under GitHub **Settings → Applications → Authorized OAuth Apps** and authorizes again.
 
 ## GitHub tokens
 

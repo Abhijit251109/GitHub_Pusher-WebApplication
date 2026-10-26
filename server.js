@@ -64,9 +64,8 @@ const FRONTEND_URL = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/
 const FRONTEND_ORIGIN = (() => { try { return FRONTEND_URL ? new URL(FRONTEND_URL).origin : ''; } catch { return ''; } })();
 const ALLOWED_GITHUB_USER_IDS = new Set(String(process.env.ALLOWED_GITHUB_USER_IDS || '').split(',').map(v => v.trim()).filter(Boolean));
 const REQUIRE_GITHUB_ALLOWLIST = String(process.env.REQUIRE_GITHUB_ALLOWLIST || '').toLowerCase() === 'true';
-// Least privilege by default. Adding delete_repo (opt-in) lets a failed first push delete the empty
-// repository it created, at the cost of every stored token being able to delete the user's
-// repositories; see SECURITY.md.
+// Use public_repo by default and request repo only after explicit private-repository consent.
+// A pre-existing token may still have delete_repo, but this app never requests that scope.
 const GITHUB_PUBLIC_SCOPE = 'public_repo';
 const GITHUB_PRIVATE_SCOPE = 'repo';
 function assertGitHubRepoAccess(user, repo) {
