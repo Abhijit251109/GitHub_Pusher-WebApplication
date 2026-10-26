@@ -8,6 +8,7 @@
   const error = document.getElementById('error');
   const params = new URLSearchParams(location.search);
   const code = params.get('code');
+  const privateReposRequested = ['1', 'true'].includes(String(params.get('private_repos') || '').toLowerCase());
 
   function validBase(base) {
     try { const u = new URL(base); return /^https?:$/.test(u.protocol); } catch { return false; }
@@ -60,11 +61,11 @@
       }
       sessionStorage.setItem('gpp_mobile_oauth_nonce', mobileNonce);
       localStorage.setItem('gpp_mobile_oauth_nonce', mobileNonce);
-      location.href = `${base}/api/auth/login?client=${client}&mobile_nonce=${encodeURIComponent(mobileNonce)}`;
+      location.href = `${base}/api/auth/login?client=${client}&mobile_nonce=${encodeURIComponent(mobileNonce)}${privateReposRequested ? '&private_repos=1' : ''}`;
       return;
     }
     const returnTo = location.href.split('#')[0];
-    location.href = `${base}/api/auth/login?return_to=${encodeURIComponent(returnTo)}`;
+    location.href = `${base}/api/auth/login?return_to=${encodeURIComponent(returnTo)}${privateReposRequested ? '&private_repos=1' : ''}`;
   }
 
   if (code) {

@@ -1,10 +1,13 @@
 // Uses the existing authenticated API and stored project workspace; never commits automatically.
 (() => {
   let projectId = null;
+  let project = null;
   let folder = '';
   let file = null;
+  let activeBranch = '';
   let busy = false;
   const area = $('codeEditor');
+  const lineNumbers = $('lineNumbers');
   const normalized = text => text.replace(/\r\n?/g, '\n');
   const dirty = () => Boolean(file && area.value !== normalized(file.content));
   const mayDiscard = () => !dirty() || confirm('Discard the unsaved edits in this file? Save first to keep them.');
@@ -16,6 +19,8 @@
     $('editorClose').disabled = busy;
     $('folderUp').disabled = busy || !folder;
     $('folderRoot').disabled = busy || !folder;
+    $('editorBranchSelect').disabled = busy;
+    $('editorSwitchBranch').disabled = busy || $('editorBranchSelect').value === activeBranch;
     area.readOnly = busy;
   }
 
@@ -39,10 +44,12 @@
   function resetFile() {
     file = null;
     area.value = '';
-    area.hidden = true;
+    $('codeEditorWrap').hidden = true;
     $('editorFileName').textContent = 'Select a file';
     $('editorStatus').textContent = 'Open a text file to start editing. Binary files and files over 2 MiB are kept unchanged.';
     $('editorPosition').textContent = 'UTF-8';
+    lineNumbers.textContent = '1';
+    lineNumbers.scrollTop = 0;
     updateControls();
   }
 
@@ -93,7 +100,7 @@
     const data = await api(`/api/projects/${projectId}/file?path=${encodeURIComponent(relative)}`);
     file = data;
     area.value = normalized(data.content);
-    area.hidden = false;
+    $('codeEditorWrap').hidden = false;
     $('editorFileName').textContent = data.path;
     $('editorStatus').textContent = `${formatBytes(data.size)} · UTF-8 · Save updates your app workspace. Push Selected publishes to GitHub.`;
     highlightFile();
@@ -110,15 +117,73 @@
     }
   }
 
-  async function openProject(project) {
+  async function openProject(selectedProject) {
     if (busy || !mayDiscard()) return;
+    project = { ...selectedProject };
     projectId = project.id;
+    activeBranch = project.branch || '';
     folder = '';
     resetFile();
     $('editorProjectName').textContent = project.name;
     $('workspaceEditor').hidden = false;
-    await task(() => listFolder(''));
+    $('editorBranchControl').hidden = !project.repoId;
+    $('editorSwitchBranch').hidden = !project.repoId;
+    await task(async () => {
+      if (project.repoId) {
+        try { await loadBranches(project.repoId, activeBranch); }
+        catch (error) {
+          $('editorBranchSelect').replaceChildren(new Option(`${activeBranch} (branch list unavailable)`, activeBranch));
+          $('editorBranchSelect').value = activeBranch;
+          toast(`Could not load branches: ${error.message}`);
+        }
+      } else $('editorBranchSelect').replaceChildren();
+      await listFolder('');
+    });
     $('workspaceEditor').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  async function loadBranches(repoId, selectedBranch) {
+    const data = await api(`/api/github/branches?repoId=${encodeURIComponent(repoId)}`);
+    const select = $('editorBranchSelect');
+    select.replaceChildren();
+    for (const branch of data.branches) {
+      const option = document.createElement('option');
+      option.value = branch.name;
+      option.textContent = branch.name;
+      select.append(option);
+    }
+    if (selectedBranch && !data.branches.some(branch => branch.name === selectedBranch)) {
+      const option = document.createElement('option');
+      option.value = selectedBranch;
+      option.textContent = `${selectedBranch} (current; unavailable)`;
+      select.append(option);
+    }
+    select.value = selectedBranch || data.defaultBranch;
+    activeBranch = select.value;
+    project.branch = activeBranch;
+    updateControls();
+  }
+
+  async function switchBranch() {
+    if (!projectId || !project?.repoId || busy || !mayDiscard()) return;
+    const branch = $('editorBranchSelect').value;
+    if (!branch || branch === activeBranch) return;
+    if (!confirm(`Switch from "${activeBranch}" to "${branch}"? This replaces the app workspace with that branch. A safety snapshot will be saved first.`)) return;
+    await task(async () => {
+      const result = await api('/api/github/switch-branch', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectId, branch })
+      });
+      project = result.project;
+      activeBranch = result.project.branch;
+      folder = '';
+      resetFile();
+      await listFolder('');
+      historyCache.delete(projectId);
+      await loadBranches(project.repoId, activeBranch).catch(error => toast(`Switched branches, but could not refresh the branch list: ${error.message}`));
+      await refresh().catch(error => toast(`Branch switched, but project details could not refresh: ${error.message}`));
+      toast(`Switched to branch ${activeBranch}.`);
+    });
   }
 
   async function save() {
@@ -144,9 +209,13 @@
     const before = area.value.slice(0, area.selectionStart);
     const lines = before.split('\n');
     $('editorPosition').textContent = `Ln ${lines.length}, Col ${lines.at(-1).length + 1} · UTF-8`;
+    let lineCount = 1;
+    for (const character of area.value) if (character === '\n') lineCount++;
+    lineNumbers.textContent = Array.from({ length: lineCount }, (_, index) => index + 1).join('\n');
   }
 
   area.oninput = () => { updateControls(); updatePosition(); };
+  area.onscroll = () => { lineNumbers.scrollTop = area.scrollTop; };
   area.addEventListener('click', updatePosition);
   area.addEventListener('keyup', updatePosition);
   area.addEventListener('keydown', event => {
@@ -159,6 +228,8 @@
     }
   });
   $('editorSave').onclick = save;
+  $('editorSwitchBranch').onclick = switchBranch;
+  $('editorBranchSelect').onchange = updateControls;
   $('editorReload').onclick = () => { if (mayDiscard()) task(reload); };
   $('folderUp').onclick = () => task(() => listFolder(folder.split('/').slice(0, -1).join('/')));
   $('folderRoot').onclick = () => task(() => listFolder(''));
@@ -166,7 +237,11 @@
     if (busy || !mayDiscard()) return;
     resetFile();
     projectId = null;
+    project = null;
+    activeBranch = '';
     $('workspaceEditor').hidden = true;
+    $('editorBranchControl').hidden = true;
+    $('editorSwitchBranch').hidden = true;
   };
   window.addEventListener('beforeunload', event => {
     if (dirty()) { event.preventDefault(); event.returnValue = ''; }
@@ -188,12 +263,20 @@
       if (projectId !== id || dirty()) return;
       await task(reload);
     },
+    async refreshBranches(id) {
+      if (projectId !== id || !project?.repoId || busy) return;
+      await task(() => loadBranches(project.repoId, activeBranch));
+    },
     prepareLeave() { if (busy) return false; return mayDiscard(); },
     selectionChanged(id) {
       if (!projectId || projectId === id) return;
       resetFile();
       projectId = null;
+      project = null;
+      activeBranch = '';
       $('workspaceEditor').hidden = true;
+      $('editorBranchControl').hidden = true;
+      $('editorSwitchBranch').hidden = true;
     }
   };
 })();
