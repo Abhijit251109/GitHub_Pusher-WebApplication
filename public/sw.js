@@ -1,4 +1,4 @@
-const CACHE = 'gpp-shell-v11';
+const CACHE = 'gpp-shell-v12';
 const base = new URL('./', self.registration.scope);
 const asset = name => new URL(name, base).toString();
 const ASSETS = ['index.html','login.html','manifest.webmanifest','config.js','app.js','editor.js','login.js','theme.js','feedback.js','styles.css','login.css','icons/icon.svg','icons/icon-192.png','icons/icon-512.png'].map(asset);
