@@ -1335,9 +1335,11 @@ app.get('/api/github/repos', async (req, res) => {
   const a = await authUser(req, res); if (!a) return;
   try {
     const token = await userToken(a.user);
+    if (!token) throw new AppError('GITHUB_NOT_CONNECTED', 'Connect GitHub before listing repositories.', { status: 401 });
     const repos = [];
     for (let page = 1; ; page++) {
       const data = await githubFetch(`https://api.github.com/user/repos?per_page=100&sort=updated&page=${page}`, { headers: githubHeaders(token) });
+      if (!Array.isArray(data)) throw new AppError('GITHUB_INVALID_RESPONSE', 'GitHub returned an invalid repository list.', { status: 502 });
       repos.push(...data);
       if (data.length < 100) break;
     }
