@@ -12,6 +12,7 @@ import { AppError, errorResponse, createOriginPolicy, parseTrustProxy, parseBran
 import { createGitRunner, withGitAuth, gitAuthEnv, checkGitCredentials } from './lib/git.js';
 import { parseEditorPath, listEditorDirectory, readEditorFile, parseFileEdit, writeEditorFile } from './lib/project-files.js';
 import { remoteRefUrl, remoteMatchesKnownCommit } from './lib/sync-preflight.js';
+import { buildGitHubPusherSession, parseAgentTask } from './lib/github-pusher-agent.js';
 
 const app = express();
 const env = (name, fallback, range) => envInt(process.env, name, fallback, range);
@@ -52,6 +53,11 @@ const EDITOR_CACHE_MAX_MB = env('EDITOR_CACHE_MAX_MB', 80, { min: 1 });
 const GIT_TIMEOUT_MS = env('GIT_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
 const JOB_TIMEOUT_MS = env('JOB_TIMEOUT_MS', 10 * 60 * 1000, { min: 1000 });
 const GITHUB_TIMEOUT_MS = 30 * 1000;
+const OPENAI_AGENT_TIMEOUT_MS = env('OPENAI_AGENT_TIMEOUT_MS', 15 * 60 * 1000, { min: 1000 });
+const OPENAI_AGENT_MODEL = process.env.OPENAI_AGENT_MODEL || 'gpt-6-sol';
+const OPENAI_AGENT_ENVIRONMENT_ID = process.env.OPENAI_AGENT_ENVIRONMENT_ID || '';
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_GITHUB_CREDENTIAL_ID = process.env.OPENAI_GITHUB_CREDENTIAL_ID || '';
 const SUPABASE_TIMEOUT_MS = env('SUPABASE_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
 const APP_NAME = process.env.APP_NAME || 'GitHub Pusher Studio';
 const SESSION_COOKIE = 'gpp_session';
@@ -872,6 +878,7 @@ const fetchLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_FETCH
 const editorLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_EDITOR_PER_15_MIN', 300), key: 'user' });
 const uploadLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_UPLOAD_PER_15_MIN', 10), key: 'user' });
 const cloneLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_CLONE_PER_15_MIN', 10), key: 'user' });
+const agentLimit = limiter({ windowMs: 15 * MINUTE, limit: env('RATE_LIMIT_AGENT_PER_15_MIN', 3), key: 'user' });
 const heavyJob = jobSlot(JOB_GATE);
 app.use('/api', apiLimit);
 
@@ -1373,6 +1380,103 @@ app.get('/api/github/branches', async (req, res) => {
     const repo = assertGitHubRepoAccess(a.user, await githubFetch(`https://api.github.com/repositories/${repoId}`, { headers: githubHeaders(token) }));
     res.json({ defaultBranch: repo.default_branch, branches: await listGitHubBranches(token, repo) });
   } catch (e) { sendError(res, e, 'List GitHub branches'); }
+});
+app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agentLimit, async (req, res) => {
+  const user = req.auth.user;
+  if (!ALLOWED_GITHUB_USER_IDS.has(String(user.id))) {
+    return res.status(403).json({ error: 'The GitHub Pusher Agent is limited to the configured app owner account.', code: 'GITHUB_AGENT_OWNER_ONLY' });
+  }
+  if (!OPENAI_API_KEY || !OPENAI_GITHUB_CREDENTIAL_ID) {
+    return res.status(503).json({ error: 'The GitHub Pusher Agent is not configured on the server.', code: 'GITHUB_AGENT_NOT_CONFIGURED' });
+  }
+
+  let projectId;
+  let task;
+  let session;
+  try {
+    projectId = parseProjectId(req.body?.projectId);
+    task = parseAgentTask(req.body?.task);
+    const project = await dbGetProject(projectId);
+    if (!project || String(project.userId) !== String(user.id)) {
+      return res.status(404).json({ error: 'Project not found.', code: 'PROJECT_NOT_FOUND' });
+    }
+    if (!project.repoFullName) {
+      return res.status(422).json({ error: 'Connect this project to GitHub before using the coding agent.', code: 'PROJECT_NOT_CONNECTED' });
+    }
+    session = buildGitHubPusherSession({
+      model: OPENAI_AGENT_MODEL,
+      credentialId: OPENAI_GITHUB_CREDENTIAL_ID,
+      environmentId: OPENAI_AGENT_ENVIRONMENT_ID,
+      repoFullName: project.repoFullName,
+      branch: project.branch || 'main',
+      task
+    });
+  } catch (e) {
+    return sendError(res, e, 'GitHub Pusher Agent request');
+  }
+
+  const disconnected = new AbortController();
+  const deadline = AbortSignal.timeout(OPENAI_AGENT_TIMEOUT_MS);
+  const signal = AbortSignal.any([disconnected.signal, deadline]);
+  res.setTimeout(OPENAI_AGENT_TIMEOUT_MS);
+  res.on('close', () => {
+    if (!res.writableEnded) disconnected.abort();
+  });
+
+  try {
+    const upstream = await fetch('https://api.openai.com/v1/agents/sessions', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+        'OpenAI-Beta': 'agents=v1'
+      },
+      body: JSON.stringify(session),
+      signal
+    });
+    if (!upstream.ok) {
+      await upstream.body?.cancel();
+      const status = upstream.status === 401 || upstream.status === 403 ? 502 : upstream.status === 429 ? 429 : 502;
+      throw new AppError(
+        'OPENAI_AGENT_FAILED',
+        status === 429 ? 'The coding agent is busy or its usage limit was reached. Try again later.' : 'The coding agent could not start. Check the server OpenAI configuration and try again.',
+        { status, internal: `OpenAI Agents API returned HTTP ${upstream.status}.` }
+      );
+    }
+    if (!upstream.body || !upstream.headers.get('content-type')?.includes('text/event-stream')) {
+      await upstream.body?.cancel();
+      throw new AppError('OPENAI_AGENT_INVALID_RESPONSE', 'The coding agent returned an unexpected response.', { status: 502 });
+    }
+
+    res.status(200).set({
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      'X-Accel-Buffering': 'no'
+    });
+    res.flushHeaders();
+    for await (const chunk of upstream.body) {
+      if (res.destroyed || disconnected.signal.aborted) break;
+      if (!res.write(chunk)) {
+        await Promise.race([
+          new Promise(resolve => res.once('drain', resolve)),
+          new Promise(resolve => res.once('close', resolve))
+        ]);
+      }
+    }
+    if (!res.destroyed && !res.writableEnded) res.end();
+  } catch (e) {
+    if (disconnected.signal.aborted || res.destroyed) return;
+    if (!res.headersSent) {
+      if (deadline.aborted) {
+        return sendError(res, new AppError('OPENAI_AGENT_TIMEOUT', 'The coding agent took too long to respond. Try again.', { status: 504 }), 'GitHub Pusher Agent');
+      }
+      return sendError(res, e, 'GitHub Pusher Agent');
+    }
+    console.error(`GitHub Pusher Agent stream failed for user ${user.id}: ${deadline.aborted ? 'request timed out' : e.message}`);
+    res.write(`event: error\ndata: ${JSON.stringify({ error: deadline.aborted ? 'The coding agent timed out.' : 'The coding agent stream was interrupted.' })}\n\n`);
+    res.end();
+  }
 });
 app.post('/api/github/clone', ensureRequestProtection, requireUser, cloneLimit, heavyJob, runJob(async (req, res) => {
   res.setTimeout(600000);

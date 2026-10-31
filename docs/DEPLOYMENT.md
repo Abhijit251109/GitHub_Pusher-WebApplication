@@ -59,7 +59,20 @@ ALLOWED_GITHUB_USER_IDS=YOUR_NUMERIC_GITHUB_USER_ID
 
 Use the numeric GitHub user ID, not the username. The server denies every other GitHub account before issuing an application session.
 
-## 5. GitHub Pages deployment
+## 5. Configure the GitHub Pusher coding agent (optional)
+
+The Coding Agent action is available only to the configured app owner and only for a project linked to a GitHub repository. It uses the selected project's repository and branch, and the user must explicitly confirm before each run. Its changes are made to the GitHub remote; use **Fetch Changes** afterward to sync them into the project workspace.
+
+1. Make sure your OpenAI project has access to the Agents API and the configured model (`gpt-6-sol` by default).
+2. In OpenAI, create a vault credential for the GitHub MCP server at `https://api.githubcopilot.com/mcp/`, then copy its credential ID.
+3. Add `OPENAI_API_KEY` and `OPENAI_GITHUB_CREDENTIAL_ID` to the Render service environment. Keep them out of the frontend, source control, and logs.
+4. Set `OPENAI_AGENT_ENVIRONMENT_ID` to the OpenAI-hosted environment ID. This is passed to the Agents API as an `openai_hosted` environment.
+5. Confirm `ALLOWED_GITHUB_USER_IDS` contains your numeric GitHub user ID. The app deliberately limits this shared server-side GitHub MCP credential to the allowlisted owner.
+6. Optionally adjust `OPENAI_AGENT_MODEL`, `OPENAI_AGENT_TIMEOUT_MS`, and `RATE_LIMIT_AGENT_PER_15_MIN`.
+
+The frontend streams the session response from the Render API. `CODEX_API_KEY` and `codex exec-server` are for a separate Codex CLI connection and are not used by this web app; configure an Agents API key as `OPENAI_API_KEY`. No Supabase schema change is needed for this feature.
+
+## 6. GitHub Pages deployment
 
 The included `.github/workflows/pages.yml` publishes `public/` as a static Pages site. This does **not** run `server.js`, and it does not require Node on the Pages host.
 
@@ -80,7 +93,7 @@ window.GPP_CONFIG = { API_BASE: 'https://YOUR-RENDER-SERVICE.onrender.com' };
 
 The frontend never receives the GitHub OAuth client secret or the Supabase service-role key. The distributable ZIP also excludes `.env`; configure backend secrets in Render instead.
 
-## 6. What is persistent now?
+## 7. What is persistent now?
 
 - User records and encrypted GitHub tokens: Supabase Postgres.
 - Sessions, OAuth state, one-time login codes, and SSE tickets: Supabase Postgres.
@@ -91,7 +104,7 @@ The frontend never receives the GitHub OAuth client secret or the Supabase servi
 
 A Render restart, spin-down, or redeploy therefore does not delete the project's cloud copy. The free Render service may still sleep when idle, and Supabase Free projects may pause after inactivity, but the stored data remains in the remote datastore rather than the Render filesystem.
 
-## 7. Free-tier storage guardrails
+## 8. Free-tier storage guardrails
 
 The application defaults to:
 
@@ -101,7 +114,7 @@ The application defaults to:
 
 On Supabase Free, which has a lower per-file upload ceiling, set `MAX_TOTAL_UPLOAD_MB=40` and `MAX_ARCHIVE_MB=45` so ordinary archives stay under it and storage use stays small. Supabase Free currently includes 1 GB of file storage and 500 MB of database size, so this is best suited to personal projects rather than a large multi-user platform.
 
-## 8. Security model
+## 9. Security model
 
 - OAuth `state` and PKCE S256 protect the sign-in flow.
 - GitHub tokens are encrypted with AES-256-GCM before they enter the database.

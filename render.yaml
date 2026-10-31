@@ -66,3 +66,15 @@ services:
         value: "true"
       - key: ALLOWED_GITHUB_USER_IDS
         sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_GITHUB_CREDENTIAL_ID
+        sync: false
+      - key: OPENAI_AGENT_ENVIRONMENT_ID
+        value: ccarenv_b64_Y2NhcmVudl82YWU1ZDE3Y2RjZWM4MTkxOGU3NGY1ZTI1MmViZjNjNQ
+      - key: OPENAI_AGENT_MODEL
+        value: gpt-6-sol
+      - key: OPENAI_AGENT_TIMEOUT_MS
+        value: "900000"
+      - key: RATE_LIMIT_AGENT_PER_15_MIN
+        value: "3"

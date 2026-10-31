@@ -11,8 +11,8 @@
     "build:windows-installer": "electron-builder --config electron-builder.yml --win msi",
     "build:android": "node scripts/build-android.mjs",
     "prepare:android": "node scripts/prepare-android.mjs",
-    "test": "node --test scripts/test-push-safety.mjs scripts/test-security.mjs scripts/test-project-files.mjs scripts/test-sync-preflight.mjs",
-    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check lib/git.js && node --check lib/project-files.js && node --check lib/sync-preflight.js && node --check public/app.js && node --check public/editor.js"
+    "test": "node --test scripts/test-push-safety.mjs scripts/test-security.mjs scripts/test-project-files.mjs scripts/test-sync-preflight.mjs scripts/test-github-pusher-agent.mjs",
+    "test:syntax": "node --check server.js && node --check lib/push-core.js && node --check lib/security.js && node --check lib/git.js && node --check lib/project-files.js && node --check lib/sync-preflight.js && node --check lib/github-pusher-agent.js && node --check public/app.js && node --check public/editor.js"
   },
   "dependencies": {
     "@supabase/supabase-js": "2.57.4",

@@ -84,6 +84,7 @@
           <button id="addBtn" class="primary">＋ Add Project</button>
           <button id="openBtn" class="secondary" disabled>⌘ Open Selected</button>
           <button id="pushBtn" class="secondary" disabled>↥ Push Selected</button>
+          <button id="agentBtn" class="secondary" disabled>✦ Coding Agent</button>
           <button id="fetchBtn" class="secondary" disabled>⇩ Fetch Changes</button>
           <button id="removeBtn" class="danger" disabled>Remove</button>
         </div>
@@ -254,6 +255,22 @@
         <button id="cloneRepoButton" class="primary" type="button">Clone selected branch</button>
         <button id="cloneAllBranchesButton" class="secondary" type="button">Clone all active branches</button>
         <button class="primary" type="submit">Close</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- GitHub Pusher Agent -->
+  <dialog id="agentDialog">
+    <form method="dialog" id="agentForm">
+      <h2>GitHub Pusher Agent</h2>
+      <p class="muted" id="agentRepository"></p>
+      <p class="warning">The agent works on the linked GitHub repository, not unsynced workspace edits. It can commit and push to the selected branch. Never include secrets in your request.</p>
+      <label for="agentTask">Task for the agent</label>
+      <textarea id="agentTask" rows="5" maxlength="4000" required placeholder="Describe the change or issue to work on…">Review the repository for push-related issues, make a focused fix, run the available checks, then commit and push only if the checks pass.</textarea>
+      <pre id="agentOutput" class="agent-output" role="status" aria-live="polite" hidden></pre>
+      <div class="dialog-actions">
+        <button id="cancelAgent" class="ghost" type="button">Cancel</button>
+        <button id="runAgent" class="primary" type="submit">Run agent &amp; allow commit/push</button>
       </div>
     </form>
   </dialog>
