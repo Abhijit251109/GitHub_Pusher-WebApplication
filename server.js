@@ -18,6 +18,7 @@ const env = (name, fallback, range) => envInt(process.env, name, fallback, range
 const PORT = env('PORT', 4173, { max: 65535 });
 const HOST = process.env.HOST || '0.0.0.0';
 const ROOT = process.cwd();
+const gitNullDevice = process.platform === 'win32' ? 'NUL' : os.devNull;
 const APPLICATIONS = path.join(ROOT, 'application');
 const APPLICATION_PLATFORMS = {
   windows: ['.msi', '.exe'],
@@ -899,7 +900,7 @@ async function sanitizeGitRepository(dir) {
   await fs.rm(path.join(gitPath, 'config'), { force: true });
   await fs.rm(path.join(gitPath, 'hooks'), { recursive: true, force: true });
   await runGit(dir, ['init']);
-  await runGit(dir, ['config', 'core.hooksPath', os.devNull]);
+  await runGit(dir, ['config', 'core.hooksPath', gitNullDevice]);
   await runGit(dir, ['config', 'commit.gpgSign', 'false']);
   await runGit(dir, ['config', 'tag.gpgSign', 'false']);
   return true;
@@ -908,7 +909,7 @@ async function ensureGit(dir, cloneUrl) {
   await fs.mkdir(dir, { recursive: true });
   const initialized = !(await sanitizeGitRepository(dir));
   if (initialized) await runGit(dir, ['init']);
-  await runGit(dir, ['config', 'core.hooksPath', os.devNull]);
+  await runGit(dir, ['config', 'core.hooksPath', gitNullDevice]);
   await runGit(dir, ['config', 'user.name', APP_NAME]);
   await runGit(dir, ['config', 'user.email', 'github-project-pusher@localhost']);
   if (cloneUrl) {

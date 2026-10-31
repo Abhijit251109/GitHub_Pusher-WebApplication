@@ -26,7 +26,15 @@ test('explorer lists folders first and hides metadata, excluded folders, links a
   await fs.mkdir(path.join(root, '.git'));
   await fs.mkdir(path.join(root, 'node_modules'));
   await fs.writeFile(path.join(root, 'readme.md'), 'hello');
-  await fs.symlink(os.tmpdir(), path.join(root, 'linked'));
+  try {
+    await fs.symlink(os.tmpdir(), path.join(root, 'linked'));
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP'].includes(error.code)) {
+      t.skip('symbolic link creation is not permitted in this environment');
+      return;
+    }
+    throw error;
+  }
   const listing = await listEditorDirectory(root, '');
   assert.deepEqual(listing.entries.map(x => [x.name, x.type]), [['src', 'directory'], ['readme.md', 'file']]);
   await assert.rejects(listEditorDirectory(root, 'linked'), { code: 'INVALID_FILE_PATH' });

@@ -4,6 +4,7 @@ import os from 'node:os';
 import { spawnSync } from 'node:child_process';
 
 const root = process.cwd();
+const gitNullDevice = process.platform === 'win32' ? 'NUL' : os.devNull;
 const targetFiles = ['server.js', 'public/app.js', 'public/index.html', 'package.json'];
 for (const file of targetFiles) {
   if (!fs.existsSync(path.join(root, file))) {
@@ -136,7 +137,7 @@ async function sanitizeGitRepository(dir,signal) {
  await fs.rm(path.join(gitPath, 'config'), { force: true });
  await fs.rm(path.join(gitPath, 'hooks'), { recursive: true, force: true });
  await runGit(dir, ['init'], {}, signal);
- await runGit(dir, ['config', 'core.hooksPath', os.devNull], {}, signal);
+ await runGit(dir, ['config', 'core.hooksPath', gitNullDevice], {}, signal);
  await runGit(dir, ['config', 'commit.gpgSign', 'false'], {}, signal);
  await runGit(dir, ['config', 'tag.gpgSign', 'false'], {}, signal);
  return true;
@@ -146,7 +147,7 @@ async function ensureGit(dir, cloneUrl, signal) {
  await fs.mkdir(dir, { recursive: true });
  const initialized = !(await sanitizeGitRepository(dir,signal));
  if (initialized) await runGit(dir, ['init'], {}, signal);
- await runGit(dir, ['config', 'core.hooksPath', os.devNull], {}, signal);
+ await runGit(dir, ['config', 'core.hooksPath', gitNullDevice], {}, signal);
  await runGit(dir, ['config', 'user.name', APP_NAME], {}, signal);
  await runGit(dir, ['config', 'user.email', 'github-project-pusher@localhost'], {}, signal);
  if (cloneUrl) {
@@ -172,8 +173,9 @@ async function runGit(cwd, args, env = {}, signal) {
   env: {
    ...process.env,
    GIT_CONFIG_NOSYSTEM: '1',
-   GIT_CONFIG_GLOBAL: os.devNull,
-   GIT_CONFIG_SYSTEM: os.devNull,
+   GIT_CONFIG_GLOBAL: gitNullDevice,
+   GIT_CONFIG_SYSTEM: gitNullDevice,
+   GIT_CONFIG_COUNT: '0',
    GIT_TERMINAL_PROMPT: '0',
    ...env
   },

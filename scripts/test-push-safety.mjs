@@ -10,7 +10,16 @@ import { promisify } from 'util';
 import { buildManifest, verifyRestoredWorkspace, performPush, commitAndPush, planPull, PushError } from '../lib/push-core.js';
 
 const execFileAsync = promisify(execFile);
-const GIT_ENV = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull, GIT_TERMINAL_PROMPT: '0' };
+const gitNullDevice = process.platform === 'win32' ? 'NUL' : os.devNull;
+const GIT_ENV = {
+  ...process.env,
+  GIT_CONFIG_NOSYSTEM: '1',
+  GIT_CONFIG_GLOBAL: gitNullDevice,
+  GIT_CONFIG_COUNT: '1',
+  GIT_CONFIG_KEY_0: 'safe.bareRepository',
+  GIT_CONFIG_VALUE_0: 'all',
+  GIT_TERMINAL_PROMPT: '0'
+};
 
 function gitIn(dir) {
   return (args, { input } = {}) => {
@@ -20,6 +29,7 @@ function gitIn(dir) {
   };
 }
 async function tmp(prefix) { return fs.mkdtemp(path.join(os.tmpdir(), `gpp-test-${prefix}-`)); }
+function symlinkUnsupported(error) { return ['EPERM', 'EACCES', 'ENOSYS', 'ENOTSUP'].includes(error?.code); }
 async function write(root, files) {
   for (const [rel, content] of Object.entries(files)) {
     await fs.mkdir(path.dirname(path.join(root, rel)), { recursive: true });
@@ -341,10 +351,16 @@ async function archiveLikeServer(dir) {
   } }, ['.']);
 }
 
-test('symlinks and submodules on GitHub are kept there but never written into the workspace (push)', async () => {
+test('symlinks and submodules on GitHub are kept there but never written into the workspace (push)', async t => {
   const remote = await bareRepo();
   const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1' } }));
-  await commitSpecialToRemote(remote);
+  try {
+    await commitSpecialToRemote(remote);
+  } catch (error) {
+    if (!symlinkUnsupported(error)) throw error;
+    t.skip('symbolic link creation is not permitted in this environment');
+    return;
+  }
   const linkBefore = await remoteEntry(remote, 'escape-link');
   const subBefore = await remoteEntry(remote, 'vendor/sub');
   let workDir;
@@ -361,11 +377,18 @@ test('symlinks and submodules on GitHub are kept there but never written into th
   assert.equal(await remoteFile(remote, 'a.txt'), 'a2');
 });
 
-test('auto-pull with a new remote symlink pulls the rest, writes no symlink, and does not wedge', async () => {
+test('auto-pull with a new remote symlink pulls the rest, writes no symlink, and does not wedge', async t => {
   const remote = await bareRepo();
   const first = await push({ id: 'p' }, pushDeps({ remote, files: { 'a.txt': 'a1' } }));
   await commitToRemote(remote, { 'b.txt': 'b-remote' });
-  const tip = await commitSpecialToRemote(remote);
+  let tip;
+  try {
+    tip = await commitSpecialToRemote(remote);
+  } catch (error) {
+    if (!symlinkUnsupported(error)) throw error;
+    t.skip('symbolic link creation is not permitted in this environment');
+    return;
+  }
 
   const pulled = await pullInto(remote, { 'a.txt': 'a1' }, first.commit);
   assert.equal(pulled.plan.action, 'pulled');
