@@ -28,6 +28,10 @@ Select the project and choose **Remove**. Removing it from the library does not 
 
 Choose **Connect GitHub** and complete GitHub authorization. No personal access token needs to be pasted into the site.
 
+## Coding Agent
+
+When enabled for the app owner, **Coding Agent** works on the selected project's linked GitHub repository and branch; it does not include unsynced workspace edits. The main agent coordinates up to four specialist subagents for GitHub synchronization, code changes, debugging, and independent analysis. The main agent reviews delegated work and rechecks the repository, branch, changes, and safety before each fetch, pull, or push. It reviews the complete result again before reporting. Use **Fetch Changes** afterward to sync any pushed commit into the app workspace.
+
 ## Push
 
 Select a project, choose **Push Selected**, then choose a repository and branch and press **Push**. The connected repository is selected by default. If no repository is selected, create a new repository from the push dialog.

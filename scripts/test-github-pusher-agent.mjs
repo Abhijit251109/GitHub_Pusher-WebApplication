@@ -17,8 +17,17 @@ test('GitHub Pusher session is scoped to the selected repository and branch', ()
   assert.equal(session.agent.tools.find(tool => tool.type === 'mcp').credential_id, 'credential-server-side');
   assert.deepEqual(session.environment, { type: 'openai_hosted', environment_id: 'ccarenv_b64_example' });
   assert.equal(session.stream, true);
+  assert.equal(session.agent.multi_agent.enabled, true);
+  assert.equal(session.agent.multi_agent.max_concurrent_subagents, 4);
   assert.match(session.agent.instructions, /only authorized repository is owner\/repo/i);
   assert.match(session.agent.instructions, /only authorized branch is feature\/fix-push/i);
+  assert.match(session.agent.instructions, /main coordinator/i);
+  assert.match(session.agent.instructions, /subagent 1 handles GitHub fetch, pull, and push/i);
+  assert.match(session.agent.instructions, /subagent 2 implements code changes/i);
+  assert.match(session.agent.instructions, /subagent 3 investigates bugs/i);
+  assert.match(session.agent.instructions, /subagent 4 independently analyzes the full change/i);
+  assert.match(session.agent.instructions, /Before every fetch, pull, or push, recheck/i);
+  assert.match(session.agent.instructions, /Before the final response, independently review the complete result/i);
   assert.match(session.agent.instructions, /Never access another repository.*force-push/is);
   assert.match(session.input, /Target repository: owner\/repo/);
   assert.match(session.input, /Target branch: feature\/fix-push/);

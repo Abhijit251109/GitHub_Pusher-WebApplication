@@ -264,7 +264,7 @@
     <form method="dialog" id="agentForm">
       <h2>GitHub Pusher Agent</h2>
       <p class="muted" id="agentRepository"></p>
-      <p class="warning">The agent works on the linked GitHub repository, not unsynced workspace edits. It can commit and push to the selected branch. Never include secrets in your request.</p>
+      <p class="warning">The agent works on the linked GitHub repository, not unsynced workspace edits. It can commit and push to the selected branch. The main agent coordinates up to four specialist subagents and reviews work before remote changes and the final report. Never include secrets in your request.</p>
       <label for="agentTask">Task for the agent</label>
       <textarea id="agentTask" rows="5" maxlength="4000" required placeholder="Describe the change or issue to work on…">Review the repository for push-related issues, make a focused fix, run the available checks, then commit and push only if the checks pass.</textarea>
       <pre id="agentOutput" class="agent-output" role="status" aria-live="polite" hidden></pre>
