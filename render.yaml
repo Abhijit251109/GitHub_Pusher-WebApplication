@@ -68,6 +68,8 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      - key: OPENAI_GITHUB_VAULT_ID
+        sync: false
       - key: OPENAI_GITHUB_CREDENTIAL_ID
         sync: false
       - key: OPENAI_AGENT_ENVIRONMENT_ID

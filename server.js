@@ -57,6 +57,7 @@ const OPENAI_AGENT_TIMEOUT_MS = env('OPENAI_AGENT_TIMEOUT_MS', 15 * 60 * 1000, {
 const OPENAI_AGENT_MODEL = process.env.OPENAI_AGENT_MODEL || 'gpt-6-sol';
 const OPENAI_AGENT_ENVIRONMENT_ID = process.env.OPENAI_AGENT_ENVIRONMENT_ID || '';
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || '';
+const OPENAI_GITHUB_VAULT_ID = process.env.OPENAI_GITHUB_VAULT_ID || '';
 const OPENAI_GITHUB_CREDENTIAL_ID = process.env.OPENAI_GITHUB_CREDENTIAL_ID || '';
 const SUPABASE_TIMEOUT_MS = env('SUPABASE_TIMEOUT_MS', 5 * 60 * 1000, { min: 1000 });
 const APP_NAME = process.env.APP_NAME || 'GitHub Pusher Studio';
@@ -1386,7 +1387,7 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
   if (!ALLOWED_GITHUB_USER_IDS.has(String(user.id))) {
     return res.status(403).json({ error: 'The GitHub Pusher Agent is limited to the configured app owner account.', code: 'GITHUB_AGENT_OWNER_ONLY' });
   }
-  if (!OPENAI_API_KEY || !OPENAI_GITHUB_CREDENTIAL_ID) {
+  if (!OPENAI_API_KEY || !OPENAI_GITHUB_VAULT_ID) {
     return res.status(503).json({ error: 'The GitHub Pusher Agent is not configured on the server.', code: 'GITHUB_AGENT_NOT_CONFIGURED' });
   }
 
@@ -1405,6 +1406,7 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
     }
     session = buildGitHubPusherSession({
       model: OPENAI_AGENT_MODEL,
+      vaultId: OPENAI_GITHUB_VAULT_ID,
       credentialId: OPENAI_GITHUB_CREDENTIAL_ID,
       environmentId: OPENAI_AGENT_ENVIRONMENT_ID,
       repoFullName: project.repoFullName,
