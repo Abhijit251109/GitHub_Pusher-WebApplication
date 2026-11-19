@@ -43,3 +43,7 @@ The [user guide](docs/USER_GUIDE.md) describes snapshots and conflict handling. 
 ## Responsiveness update
 
 For startup, editor caching and background-sync optimizations derived from master, see [PERFORMANCE_FIXES.md](PERFORMANCE_FIXES.md). These improve responses while Render is awake; they cannot prevent Free-plan cold starts.
+
+## License
+
+This project is licensed under the [Apache License, Version 2.0](LICENSE). You may use, modify, and distribute the project in accordance with its terms. See the license file for the full text.
