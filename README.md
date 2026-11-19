@@ -47,3 +47,8 @@ For startup, editor caching and background-sync optimizations derived from maste
 ## License
 
 This project is licensed under the [Apache License, Version 2.0](LICENSE). You may use, modify, and distribute the project in accordance with its terms. See the license file for the full text.
+
+
+## Copyright and contributors
+
+The original project is copyright © 2026 Abhijit Singh. Code contributions are acknowledged in [CONTRIBUTORS.md](CONTRIBUTORS.md). Each contributor retains copyright in their own contributions; contributions are made available under the project's Apache-2.0 terms as described in [LICENSE](LICENSE).
