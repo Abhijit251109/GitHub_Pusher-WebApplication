@@ -1437,12 +1437,22 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
       signal
     });
     if (!upstream.ok) {
-      await upstream.body?.cancel();
+      let upstreamDetail = '';
+      try {
+        const payload = await upstream.json();
+        const detail = payload?.error || payload;
+        const code = typeof detail?.code === 'string' ? detail.code.slice(0, 120) : '';
+        const message = typeof detail?.message === 'string' ? detail.message.replace(/[\r\n]+/g, ' ').slice(0, 500) : '';
+        upstreamDetail = [code && `code=${code}`, message && `message=${message}`].filter(Boolean).join(' ');
+      } catch {
+        await upstream.body?.cancel().catch(() => {});
+      }
+      console.warn(`OpenAI Agents API rejected session: HTTP ${upstream.status}${upstreamDetail ? ` (${upstreamDetail})` : ''}`);
       const status = upstream.status === 401 || upstream.status === 403 ? 502 : upstream.status === 429 ? 429 : 502;
       throw new AppError(
         'OPENAI_AGENT_FAILED',
-        status === 429 ? 'The coding agent is busy or its usage limit was reached. Try again later.' : 'The coding agent could not start. Check the server OpenAI configuration and try again.',
-        { status, internal: `OpenAI Agents API returned HTTP ${upstream.status}.` }
+        status === 429 ? 'The coding agent is busy or its usage limit was reached. Try again later.' : 'The coding agent could not start. Check the server OpenAI configuration and server logs for the upstream error details.',
+        { status, internal: `OpenAI Agents API returned HTTP ${upstream.status}${upstreamDetail ? ` (${upstreamDetail})` : ''}.` }
       );
     }
     if (!upstream.body || !upstream.headers.get('content-type')?.includes('text/event-stream')) {
@@ -1457,8 +1467,29 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
       'X-Accel-Buffering': 'no'
     });
     res.flushHeaders();
+    const streamDecoder = new TextDecoder();
+    let eventBuffer = '';
     for await (const chunk of upstream.body) {
       if (res.destroyed || disconnected.signal.aborted) break;
+      eventBuffer += streamDecoder.decode(chunk, { stream: true });
+      const eventBlocks = eventBuffer.split(/\r?\n\r?\n/);
+      eventBuffer = eventBlocks.pop() || '';
+      for (const block of eventBlocks) {
+        const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
+        if (!data || data === '[DONE]') continue;
+        try {
+          const event = JSON.parse(data);
+          const type = String(event.type || block.match(/^event:\s*(.+)$/m)?.[1] || 'unknown');
+          if (/failed|error/.test(type)) {
+            const detail = event.error && typeof event.error === 'object' ? event.error : {};
+            const code = typeof detail.code === 'string' ? detail.code.slice(0, 120) : '';
+            const message = typeof detail.message === 'string' ? detail.message.replace(/[\r\n]+/g, ' ').slice(0, 500) : '';
+            console.warn(`GitHub Pusher Agent event ${type}${code ? ` code=${code}` : ''}${message ? ` message=${message}` : ''}`);
+          }
+        } catch {
+          // Ignore non-JSON event data; the original stream is still forwarded unchanged.
+        }
+      }
       if (!res.write(chunk)) {
         await Promise.race([
           new Promise(resolve => res.once('drain', resolve)),
