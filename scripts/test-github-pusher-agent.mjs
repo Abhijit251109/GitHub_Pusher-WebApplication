@@ -35,6 +35,8 @@ test('GitHub Pusher session is scoped to the selected repository and branch', ()
   assert.match(session.agent.instructions, /Never access another repository.*force-push/is);
   assert.match(session.input, /Target repository: owner\/repo/);
   assert.match(session.input, /Target branch: feature\/fix-push/);
+  assert.match(session.agent.instructions, /NOT AUTHORIZED — READ-ONLY/);
+  assert.match(session.agent.instructions, /do not edit, commit, or push/i);
 });
 
 test('GitHub Pusher session rejects invalid repository, task, and credentials', () => {
@@ -57,4 +59,22 @@ test('GitHub Pusher session rejects invalid repository, task, and credentials', 
   for (const task of ['', '  ', 'x'.repeat(4001), 'read\0secrets']) {
     assert.throws(() => parseAgentTask(task), { code: 'INVALID_AGENT_TASK' });
   }
+});
+
+test('GitHub Pusher write operations require explicit task-level authorization', () => {
+  const base = {
+    model: 'gpt-6-sol', vaultId: 'vault-server-side', credentialId: '',
+    environmentId: '', repoFullName: 'owner/repo', branch: 'main'
+  };
+  const readOnly = buildGitHubPusherSession({
+    ...base,
+    task: 'Inspect this repository and report its current branch and project structure. Do not modify or push anything.'
+  });
+  assert.match(readOnly.agent.instructions, /NOT AUTHORIZED — READ-ONLY/);
+
+  const authorized = buildGitHubPusherSession({
+    ...base,
+    task: 'Please make the requested fix, run tests, and commit and push the changes.'
+  });
+  assert.match(authorized.agent.instructions, /EXPLICITLY AUTHORIZED by the task/);
 });
