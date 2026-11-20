@@ -1479,7 +1479,7 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
         if (!data || data === '[DONE]') continue;
         try {
           const event = JSON.parse(data);
-          const type = String(event.type || block.match(/^event:\\s*(.+)$/m)?.[1] || 'unknown');
+          const type = String(event.type || block.match(/^event:\s*(.+)$/m)?.[1] || 'unknown');
           if (/failed|error/.test(type)) {
             const detail = event.error && typeof event.error === 'object' ? event.error : {};
             const code = typeof detail.code === 'string' ? detail.code.slice(0, 120) : '';
