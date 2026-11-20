@@ -1442,7 +1442,7 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
         const payload = await upstream.json();
         const detail = payload?.error || payload;
         const code = typeof detail?.code === 'string' ? detail.code.slice(0, 120) : '';
-        const message = typeof detail?.message === 'string' ? detail.message.replace(/[\\r\\n]+/g, ' ').slice(0, 500) : '';
+        const message = typeof detail?.message === 'string' ? detail.message.replace(/[\r\n]+/g, ' ').slice(0, 500) : '';
         upstreamDetail = [code && `code=${code}`, message && `message=${message}`].filter(Boolean).join(' ');
       } catch {
         await upstream.body?.cancel().catch(() => {});
