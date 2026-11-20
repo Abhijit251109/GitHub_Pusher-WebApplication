@@ -1472,10 +1472,10 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
     for await (const chunk of upstream.body) {
       if (res.destroyed || disconnected.signal.aborted) break;
       eventBuffer += streamDecoder.decode(chunk, { stream: true });
-      const eventBlocks = eventBuffer.split(/\\r?\\n\\r?\\n/);
+      const eventBlocks = eventBuffer.split(/\r?\n\r?\n/);
       eventBuffer = eventBlocks.pop() || '';
       for (const block of eventBlocks) {
-        const data = block.split(/\\r?\\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\\n');
+        const data = block.split(/\r?\n/).filter(line => line.startsWith('data:')).map(line => line.slice(5).trimStart()).join('\n');
         if (!data || data === '[DONE]') continue;
         try {
           const event = JSON.parse(data);
@@ -1483,7 +1483,7 @@ app.post('/api/agents/github-pusher', ensureRequestProtection, requireUser, agen
           if (/failed|error/.test(type)) {
             const detail = event.error && typeof event.error === 'object' ? event.error : {};
             const code = typeof detail.code === 'string' ? detail.code.slice(0, 120) : '';
-            const message = typeof detail.message === 'string' ? detail.message.replace(/[\\r\\n]+/g, ' ').slice(0, 500) : '';
+            const message = typeof detail.message === 'string' ? detail.message.replace(/[\r\n]+/g, ' ').slice(0, 500) : '';
             console.warn(`GitHub Pusher Agent event ${type}${code ? ` code=${code}` : ''}${message ? ` message=${message}` : ''}`);
           }
         } catch {
